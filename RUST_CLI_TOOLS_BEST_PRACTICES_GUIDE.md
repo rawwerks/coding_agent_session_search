@@ -1,18 +1,17 @@
 # The Definitive Guide to High-Performance CLI and Automation Tools with Rust (mid-2025 Edition)
 
-This guide synthesizes modern best practices for building blazingly fast, user-friendly, and production-ready CLI tools and automation systems with Rust 1.84+, clap v4, anyhow, and tokio. It moves beyond basic argument parsing to provide battle-tested patterns for real-world command-line applications.
+This guide synthesizes modern best practices for building blazingly fast, user-friendly, and production-ready CLI tools and automation systems with the **latest Rust nightly**, clap, anyhow, and tokio. It moves beyond basic argument parsing to provide battle-tested patterns for real-world command-line applications.
 
 ## Prerequisites & Toolchain Configuration
 
-Ensure your environment uses **Rust 1.84+** (stable channel), **clap 4.5+**, **anyhow 1.0+**, and **tokio 1.44+**. The 2024 edition provides better async ergonomics and should be your default.
+Ensure your environment uses the **current Rust nightly** (pinned via `rust-toolchain.toml`) plus the latest crate releases (wildcard constraints) for **clap**, **anyhow**, and **tokio**. The 2024 edition provides better async ergonomics and should be your default.
 
 ```toml
-# Cargo.toml - Base configuration for CLI tools
+# Cargo.toml - Base configuration for CLI tools (nightly + latest crates)
 [package]
 name = "myctl"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.84"
 authors = ["Your Name <you@example.com>"]
 description = "A blazingly fast CLI tool"
 license = "MIT OR Apache-2.0"
@@ -26,45 +25,45 @@ path = "src/main.rs"
 
 [dependencies]
 # Core CLI framework
-clap = { version = "4.5", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
-clap_complete = "4.5"
-clap_mangen = "0.2"
+clap = { version = "*", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
+clap_complete = "*"
+clap_mangen = "*"
 
 # Error handling
-anyhow = "1.0"
-thiserror = "2.0"
+anyhow = "*"
+thiserror = "*"
 
 # Async runtime
-tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "signal"] }
+tokio = { version = "*", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time", "signal"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8"
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+toml = "*"
 
 # User interaction
-dialoguer = "0.11"
-indicatif = "0.17"
-console = "0.15"
-colored = "2.1"
+dialoguer = "*"
+indicatif = "*"
+console = "*"
+colored = "*"
 
 # System interaction
-directories = "5.0"
-which = "7.0"
-shell-words = "1.1"
+directories = "*"
+which = "*"
+shell-words = "*"
 
 # HTTP client for API interactions
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "*", features = ["json", "rustls-tls"], default-features = false }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter", "json"] }
 
 [dev-dependencies]
-assert_cmd = "2.0"
-predicates = "3.1"
-tempfile = "3.14"
-insta = { version = "1.43", features = ["yaml", "json"] }
+assert_cmd = "*"
+predicates = "*"
+tempfile = "*"
+insta = { version = "*", features = ["yaml", "json"] }
 
 [profile.release]
 lto = true
@@ -1719,8 +1718,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
       
