@@ -6,6 +6,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, execute};
+use chrono::{DateTime, Utc};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
@@ -40,31 +41,52 @@ enum DetailTab {
 fn render_help_overlay(frame: &mut Frame, palette: ThemePalette) {
     let area = frame.area();
     let popup_area = centered_rect(60, 50, area);
-    let help_lines = vec![
-        "q/esc: quit",
-        "/: focus query",
-        "a: agent filter",
-        "w: workspace filter",
-        "f/t: time from/to",
-        "x: clear filters",
-        "Tab: cycle detail tabs",
-        "h: toggle theme",
-        "PgUp/PgDn or [ ]: paginate",
-        "j/k or arrows: navigate",
-        "?: toggle help",
+    let sections: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("Search", palette.title()),
+            Span::raw(": type to live-search; / focuses query"),
+        ]),
+        Line::from(vec![
+            Span::styled("Filters", palette.title()),
+            Span::raw(
+                ": a agent | w workspace | f from | t to | x clear; pills show below the bar",
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Navigate", palette.title()),
+            Span::raw(": j/k or arrows move • PgUp/PgDn paginate • Tab cycles detail tabs"),
+        ]),
+        Line::from(vec![
+            Span::styled("Detail", palette.title()),
+            Span::raw(
+                ": Messages show full thread with role colors • Snippets / Raw tabs available",
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Actions", palette.title()),
+            Span::raw(": o open hit in $EDITOR • h toggle theme • ? toggle this help"),
+        ]),
+        Line::from(vec![
+            Span::styled("Quit", palette.title()),
+            Span::raw(": q or esc"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Tip", palette.title()),
+            Span::raw(
+                ": start with a query then narrow with filters; watch row shows active filters.",
+            ),
+        ]),
     ];
 
-    let text: Vec<Line> = help_lines
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(palette.fg))))
-        .collect();
-
     let block = Block::default()
-        .title(Span::styled("Help", palette.title()))
+        .title(Span::styled("Help / Onboarding", palette.title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
     frame.render_widget(
-        Paragraph::new(text).block(block).wrap(Wrap { trim: true }),
+        Paragraph::new(sections)
+            .block(block)
+            .wrap(Wrap { trim: true }),
         popup_area,
     );
 }
@@ -131,9 +153,9 @@ fn highlight_terms_owned(text: String, query: &str, palette: ThemePalette) -> Li
 
 pub fn footer_legend(show_help: bool) -> &'static str {
     if show_help {
-        "q/esc quit • arrows/PgUp/PgDn navigate • / focus query • a agent • w workspace • f from • t to • x clear • tab detail • h theme"
+        "q/esc quit • arrows/PgUp/PgDn navigate • / focus query • a agent • w workspace • f from • t to • x clear • tab detail • h theme • o open"
     } else {
-        "?/hide help | a agent | w workspace | f from | t to | x clear | tab detail | h theme | q quit"
+        "?/hide help | a agent | w workspace | f from | t to | x clear | tab detail | h theme | o open | q quit"
     }
 }
 
@@ -176,263 +198,276 @@ pub fn run_tui() -> Result<()> {
     let mut selected: Option<usize> = None;
     let mut detail_tab = DetailTab::Messages;
     let mut theme_dark = true;
-    let mut show_help = false;
+    // Show onboarding overlay on first launch; user can dismiss with '?'.
+    let mut show_help = true;
     let mut last_error: Option<String> = None;
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut last_query = String::new();
+    let mut needs_draw = true;
 
     loop {
-        terminal.draw(|f| {
-            let palette = if theme_dark {
-                ThemePalette::dark()
-            } else {
-                ThemePalette::light()
-            };
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints(
-                    [
-                        Constraint::Length(3), // search bar
-                        Constraint::Length(1), // filter pills
-                        Constraint::Min(0),    // results + detail
-                        Constraint::Length(1), // footer
-                    ]
-                    .as_ref(),
-                )
-                .split(f.area());
-
-            let bar_text = match input_mode {
-                InputMode::Query => query.as_str().to_string(),
-                InputMode::Agent => format!("[agent] {}", input_buffer),
-                InputMode::Workspace => format!("[workspace] {}", input_buffer),
-                InputMode::CreatedFrom => format!("[from ts ms] {}", input_buffer),
-                InputMode::CreatedTo => format!("[to ts ms] {}", input_buffer),
-            };
-            let sb = search_bar(&bar_text);
-            f.render_widget(sb, chunks[0]);
-
-            // Filter pills row
-            let mut pill_spans = Vec::new();
-            if !filters.agents.is_empty() {
-                pill_spans.push(Span::styled(
-                    format!(
-                        "agent:{}",
-                        filters.agents.iter().cloned().collect::<Vec<_>>().join("|")
-                    ),
-                    Style::default()
-                        .fg(palette.accent_alt)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                pill_spans.push(Span::raw("  "));
-            }
-            if !filters.workspaces.is_empty() {
-                pill_spans.push(Span::styled(
-                    format!(
-                        "ws:{}",
-                        filters
-                            .workspaces
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("|")
-                    ),
-                    Style::default().fg(palette.accent_alt),
-                ));
-                pill_spans.push(Span::raw("  "));
-            }
-            if filters.created_from.is_some() || filters.created_to.is_some() {
-                pill_spans.push(Span::styled(
-                    format!("time:{:?}->{:?}", filters.created_from, filters.created_to),
-                    Style::default().fg(palette.accent_alt),
-                ));
-            }
-            if pill_spans.is_empty() {
-                pill_spans.push(Span::styled(
-                    "filters: none (press a/w/f/t)",
-                    Style::default().fg(palette.hint),
-                ));
-            }
-            let pill_para = Paragraph::new(Line::from(pill_spans));
-            f.render_widget(pill_para, chunks[1]);
-
-            let items: Vec<ListItem> = if results.is_empty() {
-                vec![ListItem::new("No results yet - start typing to search.")]
-            } else {
-                results
-                    .iter()
-                    .map(|hit| {
-                        let title = if hit.title.is_empty() {
-                            "(untitled)"
-                        } else {
-                            hit.title.as_str()
-                        };
-                        let header = Line::from(vec![
-                            Span::raw(format!("{:.2} ", hit.score)),
-                            Span::styled(title, Style::default().fg(palette.accent)),
-                            Span::raw(format!(" [{}]", hit.agent)),
-                        ]);
-                        let location = if hit.workspace.is_empty() {
-                            hit.source_path.clone()
-                        } else {
-                            format!("{} ({})", hit.source_path, hit.workspace)
-                        };
-                        let body = Line::from(format!("{location} • {}", hit.snippet));
-                        ListItem::new(vec![header, body])
-                    })
-                    .collect()
-            };
-            let list_block = Block::default().title("Results").borders(Borders::ALL);
-
-            let mut list_state = ListState::default();
-            list_state.select(selected);
-
-            let split = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-                .split(chunks[2]);
-
-            f.render_stateful_widget(
-                List::new(items).block(list_block),
-                split[0],
-                &mut list_state,
-            );
-
-            let detail_area = split[1];
-            if let Some(hit) = selected.and_then(|idx| results.get(idx)) {
-                let tabs = ["Messages", "Snippets", "Raw"];
-                let tab_titles: Vec<Line> = tabs
-                    .iter()
-                    .map(|t| Line::from(Span::styled(*t, palette.title())))
-                    .collect();
-                let tab_widget = Tabs::new(tab_titles)
-                    .select(match detail_tab {
-                        DetailTab::Messages => 0,
-                        DetailTab::Snippets => 1,
-                        DetailTab::Raw => 2,
-                    })
-                    .highlight_style(Style::default().fg(palette.accent));
-
-                let mut meta_lines = Vec::new();
-                meta_lines.push(Line::from(vec![
-                    Span::styled("Title: ", palette.title()),
-                    Span::raw(hit.title.clone()),
-                ]));
-                meta_lines.push(Line::from(vec![
-                    Span::styled("Agent: ", Style::default().fg(palette.hint)),
-                    Span::raw(hit.agent.clone()),
-                ]));
-                meta_lines.push(Line::from(vec![
-                    Span::styled("Workspace: ", Style::default().fg(palette.hint)),
-                    Span::raw(if hit.workspace.is_empty() {
-                        "(none)".into()
-                    } else {
-                        hit.workspace.clone()
-                    }),
-                ]));
-                meta_lines.push(Line::from(vec![
-                    Span::styled("Source: ", Style::default().fg(palette.hint)),
-                    Span::raw(hit.source_path.clone()),
-                ]));
-                meta_lines.push(Line::from(format!("Score: {:.2}", hit.score)));
-                meta_lines.push(Line::from(""));
-
-                let detail = if cached_detail
-                    .as_ref()
-                    .map(|(p, _)| p == &hit.source_path)
-                    .unwrap_or(false)
-                {
-                    cached_detail.as_ref().map(|(_, d)| d.clone())
+        if needs_draw {
+            terminal.draw(|f| {
+                let palette = if theme_dark {
+                    ThemePalette::dark()
                 } else {
-                    let loaded = load_conversation(&db_path, &hit.source_path).ok().flatten();
-                    if let Some(d) = &loaded {
-                        cached_detail = Some((hit.source_path.clone(), d.clone()));
-                    }
-                    loaded
+                    ThemePalette::light()
                 };
 
-                let content_para = match detail_tab {
-                    DetailTab::Messages => {
-                        if let Some(full) = detail {
-                            let mut lines = Vec::new();
-                            for msg in full.messages {
-                                let role_label = match msg.role {
-                                    MessageRole::User => "you",
-                                    MessageRole::Agent => "agent",
-                                    MessageRole::Tool => "tool",
-                                    MessageRole::System => "system",
-                                    MessageRole::Other(ref r) => r.as_str(),
-                                };
-                                let ts = msg
-                                    .created_at
-                                    .map(|t| format!(" ({t})"))
-                                    .unwrap_or_default();
-                                lines.push(Line::from(vec![
-                                    Span::styled(format!("[{role_label}]"), role_style(&msg.role)),
-                                    Span::raw(ts),
-                                ]));
-                                let owned = msg.content.clone();
-                                let content_line =
-                                    highlight_terms_owned(owned, &last_query, palette);
-                                lines.push(content_line);
-                                lines.push(Line::from(""));
-                            }
-                            if lines.is_empty() {
-                                Paragraph::new("No messages")
-                                    .style(Style::default().fg(palette.hint))
-                            } else {
-                                Paragraph::new(lines).wrap(Wrap { trim: true })
-                            }
-                        } else {
-                            Paragraph::new(hit.content.clone()).wrap(Wrap { trim: true })
-                        }
-                    }
-                    DetailTab::Snippets => Paragraph::new("No snippets indexed yet.")
-                        .style(Style::default().fg(palette.hint)),
-                    DetailTab::Raw => Paragraph::new(format!("Path: {}", hit.source_path))
-                        .wrap(Wrap { trim: true }),
-                }
-                .block(Block::default().title("Detail").borders(Borders::ALL));
-
-                let layout = Layout::default()
+                let chunks = Layout::default()
                     .direction(Direction::Vertical)
+                    .margin(1)
                     .constraints(
                         [
-                            Constraint::Length(2),
-                            Constraint::Length(meta_lines.len() as u16 + 2),
-                            Constraint::Min(3),
+                            Constraint::Length(3), // search bar
+                            Constraint::Length(1), // filter pills
+                            Constraint::Min(0),    // results + detail
+                            Constraint::Length(1), // footer
                         ]
                         .as_ref(),
                     )
-                    .split(detail_area);
+                    .split(f.area());
 
-                f.render_widget(tab_widget, layout[0]);
-                f.render_widget(Paragraph::new(meta_lines), layout[1]);
-                f.render_widget(content_para, layout[2]);
-            } else {
-                f.render_widget(
-                    Paragraph::new("Select a result to view details")
-                        .block(Block::default().title("Detail").borders(Borders::ALL)),
-                    detail_area,
+                let bar_text = match input_mode {
+                    InputMode::Query => query.as_str().to_string(),
+                    InputMode::Agent => format!("[agent] {}", input_buffer),
+                    InputMode::Workspace => format!("[workspace] {}", input_buffer),
+                    InputMode::CreatedFrom => format!("[from ts ms] {}", input_buffer),
+                    InputMode::CreatedTo => format!("[to ts ms] {}", input_buffer),
+                };
+                let sb = search_bar(&bar_text);
+                f.render_widget(sb, chunks[0]);
+
+                // Filter pills row
+                let mut pill_spans = Vec::new();
+                if !filters.agents.is_empty() {
+                    pill_spans.push(Span::styled(
+                        format!(
+                            "agent:{}",
+                            filters.agents.iter().cloned().collect::<Vec<_>>().join("|")
+                        ),
+                        Style::default()
+                            .fg(palette.accent_alt)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    pill_spans.push(Span::raw("  "));
+                }
+                if !filters.workspaces.is_empty() {
+                    pill_spans.push(Span::styled(
+                        format!(
+                            "ws:{}",
+                            filters
+                                .workspaces
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("|")
+                        ),
+                        Style::default().fg(palette.accent_alt),
+                    ));
+                    pill_spans.push(Span::raw("  "));
+                }
+                if filters.created_from.is_some() || filters.created_to.is_some() {
+                    pill_spans.push(Span::styled(
+                        format!("time:{:?}->{:?}", filters.created_from, filters.created_to),
+                        Style::default().fg(palette.accent_alt),
+                    ));
+                }
+                if pill_spans.is_empty() {
+                    pill_spans.push(Span::styled(
+                        "filters: none (press a/w/f/t)",
+                        Style::default().fg(palette.hint),
+                    ));
+                }
+                let pill_para = Paragraph::new(Line::from(pill_spans));
+                f.render_widget(pill_para, chunks[1]);
+
+                let items: Vec<ListItem> = if results.is_empty() {
+                    vec![ListItem::new("No results yet - start typing to search.")]
+                } else {
+                    results
+                        .iter()
+                        .map(|hit| {
+                            let title = if hit.title.is_empty() {
+                                "(untitled)"
+                            } else {
+                                hit.title.as_str()
+                            };
+                            let header = Line::from(vec![
+                                Span::raw(format!("{:.2} ", hit.score)),
+                                Span::styled(title, Style::default().fg(palette.accent)),
+                                Span::raw(format!(" [{}]", hit.agent)),
+                            ]);
+                            let location = if hit.workspace.is_empty() {
+                                hit.source_path.clone()
+                            } else {
+                                format!("{} ({})", hit.source_path, hit.workspace)
+                            };
+                            let body = Line::from(format!("{location} • {}", hit.snippet));
+                            ListItem::new(vec![header, body])
+                        })
+                        .collect()
+                };
+                let list_block = Block::default().title("Results").borders(Borders::ALL);
+
+                let mut list_state = ListState::default();
+                list_state.select(selected);
+
+                let split = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+                    .split(chunks[2]);
+
+                f.render_stateful_widget(
+                    List::new(items).block(list_block),
+                    split[0],
+                    &mut list_state,
                 );
-            }
 
-            let footer = Paragraph::new(format!("{} | {}", status, footer_legend(show_help)));
-            f.render_widget(footer, chunks[3]);
+                let detail_area = split[1];
+                if let Some(hit) = selected.and_then(|idx| results.get(idx)) {
+                    let tabs = ["Messages", "Snippets", "Raw"];
+                    let tab_titles: Vec<Line> = tabs
+                        .iter()
+                        .map(|t| Line::from(Span::styled(*t, palette.title())))
+                        .collect();
+                    let tab_widget = Tabs::new(tab_titles)
+                        .select(match detail_tab {
+                            DetailTab::Messages => 0,
+                            DetailTab::Snippets => 1,
+                            DetailTab::Raw => 2,
+                        })
+                        .highlight_style(Style::default().fg(palette.accent));
 
-            if show_help {
-                render_help_overlay(f, palette);
-            }
-        })?;
+                    let mut meta_lines = Vec::new();
+                    meta_lines.push(Line::from(vec![
+                        Span::styled("Title: ", palette.title()),
+                        Span::raw(hit.title.clone()),
+                    ]));
+                    meta_lines.push(Line::from(vec![
+                        Span::styled("Agent: ", Style::default().fg(palette.hint)),
+                        Span::raw(hit.agent.clone()),
+                    ]));
+                    meta_lines.push(Line::from(vec![
+                        Span::styled("Workspace: ", Style::default().fg(palette.hint)),
+                        Span::raw(if hit.workspace.is_empty() {
+                            "(none)".into()
+                        } else {
+                            hit.workspace.clone()
+                        }),
+                    ]));
+                    meta_lines.push(Line::from(vec![
+                        Span::styled("Source: ", Style::default().fg(palette.hint)),
+                        Span::raw(hit.source_path.clone()),
+                    ]));
+                    meta_lines.push(Line::from(format!("Score: {:.2}", hit.score)));
+                    meta_lines.push(Line::from(""));
 
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_millis(0));
+                    let detail = if cached_detail
+                        .as_ref()
+                        .map(|(p, _)| p == &hit.source_path)
+                        .unwrap_or(false)
+                    {
+                        cached_detail.as_ref().map(|(_, d)| d.clone())
+                    } else {
+                        let loaded = load_conversation(&db_path, &hit.source_path).ok().flatten();
+                        if let Some(d) = &loaded {
+                            cached_detail = Some((hit.source_path.clone(), d.clone()));
+                        }
+                        loaded
+                    };
+
+                    let content_para = match detail_tab {
+                        DetailTab::Messages => {
+                            if let Some(full) = detail {
+                                let mut lines = Vec::new();
+                                for msg in full.messages {
+                                    let role_label = match msg.role {
+                                        MessageRole::User => "you",
+                                        MessageRole::Agent => "agent",
+                                        MessageRole::Tool => "tool",
+                                        MessageRole::System => "system",
+                                        MessageRole::Other(ref r) => r.as_str(),
+                                    };
+                                    let ts = msg
+                                        .created_at
+                                        .map(|t| format!(" ({t})"))
+                                        .unwrap_or_default();
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            format!("[{role_label}]"),
+                                            role_style(&msg.role),
+                                        ),
+                                        Span::raw(ts),
+                                    ]));
+                                    let owned = msg.content.clone();
+                                    let content_line =
+                                        highlight_terms_owned(owned, &last_query, palette);
+                                    lines.push(content_line);
+                                    lines.push(Line::from(""));
+                                }
+                                if lines.is_empty() {
+                                    Paragraph::new("No messages")
+                                        .style(Style::default().fg(palette.hint))
+                                } else {
+                                    Paragraph::new(lines).wrap(Wrap { trim: true })
+                                }
+                            } else {
+                                Paragraph::new(hit.content.clone()).wrap(Wrap { trim: true })
+                            }
+                        }
+                        DetailTab::Snippets => Paragraph::new("No snippets indexed yet.")
+                            .style(Style::default().fg(palette.hint)),
+                        DetailTab::Raw => Paragraph::new(format!("Path: {}", hit.source_path))
+                            .wrap(Wrap { trim: true }),
+                    }
+                    .block(Block::default().title("Detail").borders(Borders::ALL));
+
+                    let layout = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints(
+                            [
+                                Constraint::Length(2),
+                                Constraint::Length(meta_lines.len() as u16 + 2),
+                                Constraint::Min(3),
+                            ]
+                            .as_ref(),
+                        )
+                        .split(detail_area);
+
+                    f.render_widget(tab_widget, layout[0]);
+                    f.render_widget(Paragraph::new(meta_lines), layout[1]);
+                    f.render_widget(content_para, layout[2]);
+                } else {
+                    f.render_widget(
+                        Paragraph::new("Select a result to view details")
+                            .block(Block::default().title("Detail").borders(Borders::ALL)),
+                        detail_area,
+                    );
+                }
+
+                let footer = Paragraph::new(format!("{} | {}", status, footer_legend(show_help)));
+                f.render_widget(footer, chunks[3]);
+
+                if show_help {
+                    render_help_overlay(f, palette);
+                }
+            })?;
+            needs_draw = false;
+        }
+
+        let timeout = if needs_draw {
+            Duration::from_millis(0)
+        } else {
+            tick_rate
+                .checked_sub(last_tick.elapsed())
+                .unwrap_or_else(|| Duration::from_millis(0))
+        };
 
         if crossterm::event::poll(timeout)?
             && let Event::Key(key) = event::read()?
         {
+            needs_draw = true;
             match input_mode {
                 InputMode::Query => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break,
@@ -655,6 +690,7 @@ pub fn run_tui() -> Result<()> {
                             if hits.is_empty() && page > 0 {
                                 page = page.saturating_sub(1);
                                 selected = None;
+                                needs_draw = true;
                             } else {
                                 results = hits;
                                 status = format!(
@@ -672,6 +708,7 @@ pub fn run_tui() -> Result<()> {
                                 {
                                     selected = Some(results.len() - 1);
                                 }
+                                needs_draw = true;
                             }
                         }
                         Err(err) => {
@@ -679,6 +716,7 @@ pub fn run_tui() -> Result<()> {
                             last_error = Some(format!("Search error: {err}"));
                             status = "Search error (see footer).".to_string();
                             results.clear();
+                            needs_draw = true;
                         }
                     }
                 } else if query.trim().is_empty() {
@@ -686,6 +724,7 @@ pub fn run_tui() -> Result<()> {
                     status =
                         "Type to search. Hotkeys: a agent, w workspace, f from, t to, x clear, PgUp/PgDn paginate, q quit."
                             .to_string();
+                    needs_draw = true;
                 }
             }
             last_tick = Instant::now();
