@@ -20,7 +20,7 @@ Load `.env` at startup using dotenvy (see `src/main.rs`); do not use `std::env::
   Flags: `--version vX.Y.Z`, `--dest DIR`, `--easy-mode`, `OWNER/REPO override`, `--checksum` or `--checksum-url`. The installer *requires* verification: by default it fetches `<tar>.sha256` next to the artifact; override with `--checksum` if you already have it.
 - PowerShell (Windows): `irm https://raw.githubusercontent.com/coding-agent-search/coding-agent-search/main/install.ps1 | iex` with the same checksum rules (defaults to `<zip>.sha256`).
 - Homebrew: `brew install coding-agent-search` (formula refuses to install while `sha256` is a placeholder—set real SHA before publishing).
-- Releases: built via cargo-dist (`.github/workflows/dist.yml`). When publishing, upload the platform archives **and** matching `.sha256` files; keep README links and the Homebrew formula in sync.
+- Releases: built via cargo-dist (`.github/workflows/dist.yml`). The dist workflow now writes `.sha256` files for every artifact and uploads them as workflow artifacts—copy those SHA values into `packaging/homebrew/coding-agent-search.rb` and public release assets before cutting a tag.
 
 ## Usage (TUI & indexing)
 - Quickstart: `coding-agent-search index --full` (first run) then `coding-agent-search tui`.
