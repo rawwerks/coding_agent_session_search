@@ -12,7 +12,7 @@ fn gemini_parses_jsonl_fixture() {
     };
     let convs = conn.scan(&ctx).expect("scan");
     assert!(
-        convs.len() >= 1,
+        !convs.is_empty(),
         "expected at least one conversation from fixture root"
     );
     let c = &convs[0];
