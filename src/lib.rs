@@ -30,7 +30,15 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Launch interactive TUI
-    Tui,
+    Tui {
+        /// Render once and exit (headless-friendly)
+        #[arg(long, default_value_t = false)]
+        once: bool,
+
+        /// Override data dir (matches index --data-dir)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
     /// Run indexer
     Index {
         /// Perform full rebuild
@@ -58,7 +66,7 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Tui => ui::tui::run_tui(),
+        Commands::Tui { once, data_dir } => ui::tui::run_tui(data_dir, once),
         Commands::Index {
             full,
             watch,

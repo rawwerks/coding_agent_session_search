@@ -14,13 +14,13 @@ use std::io;
 use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 
+use crate::default_data_dir;
 use crate::model::types::MessageRole;
 use crate::search::query::{SearchClient, SearchFilters, SearchHit};
 use crate::search::tantivy::index_dir;
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::widgets::search_bar;
 use crate::ui::data::{ConversationView, load_conversation, role_style};
-use crate::{default_data_dir, default_db_path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputMode {
@@ -172,16 +172,24 @@ pub fn footer_legend(show_help: bool) -> &'static str {
     }
 }
 
-pub fn run_tui() -> Result<()> {
+pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Result<()> {
+    if once
+        && std::env::var("TUI_HEADLESS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    {
+        return run_tui_headless(data_dir_override);
+    }
+
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     stdout.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let data_dir = default_data_dir();
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
     let index_path = index_dir(&data_dir)?;
-    let db_path = default_db_path();
+    let db_path = default_db_path_for(&data_dir);
     let search_client = SearchClient::open(&index_path, Some(&db_path))?;
     let index_ready = search_client.is_some();
     let mut status = if index_ready {
@@ -866,6 +874,20 @@ pub fn run_tui() -> Result<()> {
     }
 
     teardown_terminal()
+}
+
+fn default_db_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("agent_search.db")
+}
+
+fn run_tui_headless(data_dir_override: Option<std::path::PathBuf>) -> Result<()> {
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let index_path = index_dir(&data_dir)?;
+    let db_path = default_db_path_for(&data_dir);
+    let client = SearchClient::open(&index_path, Some(&db_path))?
+        .ok_or_else(|| anyhow::anyhow!("index/db not found"))?;
+    let _ = client.search("", SearchFilters::default(), 5, 0)?;
+    Ok(())
 }
 
 fn teardown_terminal() -> Result<()> {
