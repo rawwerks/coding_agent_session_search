@@ -2,8 +2,8 @@ class CodingAgentSearch < Formula
   desc "Unified TUI search over local coding agent histories"
   homepage "https://github.com/coding-agent-search/coding-agent-search"
   version "0.1.0"
-  url "https://github.com/coding-agent-search/coding-agent-search/releases/download/v0.1.0/coding-agent-search-v0.1.0-macos-arm64.tar.gz"
-  sha256 "REPLACE_WITH_REAL_SHA256"
+  url "https://github.com/Dicklesworthstone/coding_agent_session_search/releases/download/v0.1.0/coding-agent-search-v0.1.0-linux-x86_64.tar.gz"
+  sha256 "58dd064f64d69ac1aec13ab504f1ba02e8f425b429d0e71900db75ea825e5715"
   license "MIT"
 
   def verify_checksum_placeholder!
