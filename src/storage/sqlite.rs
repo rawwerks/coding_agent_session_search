@@ -147,6 +147,11 @@ pub struct SqliteStorage {
     conn: Connection,
 }
 
+pub struct InsertOutcome {
+    pub conversation_id: i64,
+    pub inserted_indices: Vec<i64>,
+}
+
 impl SqliteStorage {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -166,6 +171,17 @@ impl SqliteStorage {
 
     pub fn raw(&self) -> &Connection {
         &self.conn
+    }
+
+    pub fn schema_version(&self) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |row| row.get::<_, String>(0).map(|s| s.parse().unwrap_or(0)),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("schema_version missing"))
     }
 
     pub fn ensure_agent(&self, agent: &Agent) -> Result<i64> {
@@ -214,11 +230,10 @@ impl SqliteStorage {
         agent_id: i64,
         workspace_id: Option<i64>,
         conv: &Conversation,
-    ) -> Result<i64> {
-        let tx = self.conn.transaction()?;
-
+    ) -> Result<InsertOutcome> {
         if let Some(ext) = &conv.external_id
-            && let Some(existing) = tx
+            && let Some(existing) = self
+                .conn
                 .query_row(
                     "SELECT id FROM conversations WHERE agent_id = ? AND external_id = ?",
                     params![agent_id, ext],
@@ -226,8 +241,10 @@ impl SqliteStorage {
                 )
                 .optional()?
         {
-            return Ok(existing);
+            return self.append_messages(existing, conv);
         }
+
+        let tx = self.conn.transaction()?;
 
         let conv_id = insert_conversation(&tx, agent_id, workspace_id, conv)?;
         for msg in &conv.messages {
@@ -236,7 +253,178 @@ impl SqliteStorage {
             insert_fts_message(&tx, msg_id, msg, conv)?;
         }
         tx.commit()?;
-        Ok(conv_id)
+        Ok(InsertOutcome {
+            conversation_id: conv_id,
+            inserted_indices: conv.messages.iter().map(|m| m.idx).collect(),
+        })
+    }
+
+    fn append_messages(
+        &mut self,
+        conversation_id: i64,
+        conv: &Conversation,
+    ) -> Result<InsertOutcome> {
+        let tx = self.conn.transaction()?;
+
+        let max_idx: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(idx) FROM messages WHERE conversation_id = ?",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let cutoff = max_idx.unwrap_or(-1);
+
+        let mut inserted_indices = Vec::new();
+        for msg in &conv.messages {
+            if msg.idx <= cutoff {
+                continue;
+            }
+            let msg_id = insert_message(&tx, conversation_id, msg)?;
+            insert_snippets(&tx, msg_id, &msg.snippets)?;
+            insert_fts_message(&tx, msg_id, msg, conv)?;
+            inserted_indices.push(msg.idx);
+        }
+
+        if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+            tx.execute(
+                "UPDATE conversations SET ended_at = MAX(ended_at, ?) WHERE id = ?",
+                params![last_ts, conversation_id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(InsertOutcome {
+            conversation_id,
+            inserted_indices,
+        })
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, slug, name, version, kind FROM agents ORDER BY slug")?;
+        let rows = stmt.query_map([], |row| {
+            let kind: String = row.get(4)?;
+            Ok(Agent {
+                id: Some(row.get(0)?),
+                slug: row.get(1)?,
+                name: row.get(2)?,
+                version: row.get(3)?,
+                kind: match kind.as_str() {
+                    "cli" => AgentKind::Cli,
+                    "vscode" => AgentKind::VsCode,
+                    _ => AgentKind::Hybrid,
+                },
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<crate::model::types::Workspace>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path, display_name FROM workspaces ORDER BY path")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::model::types::Workspace {
+                id: Some(row.get(0)?),
+                path: Path::new(&row.get::<_, String>(1)?).to_path_buf(),
+                display_name: row.get(2).ok(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_conversations(&self, limit: i64, offset: i64) -> Result<Vec<Conversation>> {
+        let mut stmt = self.conn.prepare(
+            r#"SELECT c.id, a.slug, w.path, c.external_id, c.title, c.source_path,
+                       c.started_at, c.ended_at, c.approx_tokens, c.metadata_json
+                FROM conversations c
+                JOIN agents a ON c.agent_id = a.id
+                LEFT JOIN workspaces w ON c.workspace_id = w.id
+                ORDER BY c.started_at DESC NULLS LAST, c.id DESC
+                LIMIT ? OFFSET ?"#,
+        )?;
+
+        let rows = stmt.query_map(params![limit, offset], |row| {
+            Ok(Conversation {
+                id: Some(row.get(0)?),
+                agent_slug: row.get(1)?,
+                workspace: row
+                    .get::<_, Option<String>>(2)?
+                    .map(|p| Path::new(&p).to_path_buf()),
+                external_id: row.get(3)?,
+                title: row.get(4)?,
+                source_path: Path::new(&row.get::<_, String>(5)?).to_path_buf(),
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                approx_tokens: row.get(8)?,
+                metadata_json: row
+                    .get::<_, Option<String>>(9)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+                messages: Vec::new(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn fetch_messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, idx, role, author, created_at, content, extra_json FROM messages WHERE conversation_id = ? ORDER BY idx",
+        )?;
+        let rows = stmt.query_map(params![conversation_id], |row| {
+            let role: String = row.get(2)?;
+            Ok(Message {
+                id: Some(row.get(0)?),
+                idx: row.get(1)?,
+                role: match role.as_str() {
+                    "user" => MessageRole::User,
+                    "agent" | "assistant" => MessageRole::Agent,
+                    "tool" => MessageRole::Tool,
+                    "system" => MessageRole::System,
+                    other => MessageRole::Other(other.to_string()),
+                },
+                author: row.get(3).ok(),
+                created_at: row.get(4).ok(),
+                content: row.get(5)?,
+                extra_json: row
+                    .get::<_, Option<String>>(6)?
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default(),
+                snippets: Vec::new(),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn rebuild_fts(&mut self) -> Result<()> {
+        self.conn.execute("DELETE FROM fts_messages", [])?;
+        self.conn.execute_batch(
+            r#"INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+               SELECT m.content, c.title, a.slug, w.path, c.source_path, m.created_at, m.id
+               FROM messages m
+               JOIN conversations c ON m.conversation_id = c.id
+               JOIN agents a ON c.agent_id = a.id
+               LEFT JOIN workspaces w ON c.workspace_id = w.id;"#,
+        )?;
+        Ok(())
     }
 }
 
