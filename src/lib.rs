@@ -104,25 +104,31 @@ pub async fn run() -> Result<()> {
             // TUI mode: Log to file to avoid breaking the UI
             let log_dir = data_dir.clone().unwrap_or_else(default_data_dir);
             std::fs::create_dir_all(&log_dir).ok();
-            
+
             let file_appender = tracing_appender::rolling::daily(&log_dir, "cass.log");
             let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-            
+
             tracing_subscriber::registry()
                 .with(filter)
-                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).compact().with_target(false).with_ansi(false))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .compact()
+                        .with_target(false)
+                        .with_ansi(false),
+                )
                 .init();
-            
+
             maybe_prompt_for_update(matches!(command, Commands::Tui { once: true, .. })).await?;
-            
+
             if let Commands::Tui { once: false, .. } = &command {
-                 let bg_data_dir = log_dir.clone();
-                 let bg_db = cli.db.clone();
-                 spawn_background_indexer(bg_data_dir, bg_db);
+                let bg_data_dir = log_dir.clone();
+                let bg_db = cli.db.clone();
+                spawn_background_indexer(bg_data_dir, bg_db);
             }
-            
+
             if let Commands::Tui { once, data_dir } = command {
-                 ui::tui::run_tui(data_dir, once)?;
+                ui::tui::run_tui(data_dir, once)?;
             }
         }
         Commands::Index { .. } | Commands::Search { .. } => {
@@ -133,38 +139,49 @@ pub async fn run() -> Result<()> {
                 .compact()
                 .with_target(false)
                 .init();
-                
+
             match command {
-                Commands::Index { full, watch, data_dir } => {
+                Commands::Index {
+                    full,
+                    watch,
+                    data_dir,
+                } => {
                     run_index_with_data(cli.db, full, watch, data_dir)?;
                 }
-                Commands::Search { query, agent, workspace, limit, json, data_dir } => {
+                Commands::Search {
+                    query,
+                    agent,
+                    workspace,
+                    limit,
+                    json,
+                    data_dir,
+                } => {
                     run_cli_search(&query, &agent, &workspace, &limit, &json, &data_dir, cli.db)?;
                 }
                 _ => {}
             }
         }
         _ => {
-             // Completions/Man: No logging needed usually, or stderr
-             tracing_subscriber::fmt()
+            // Completions/Man: No logging needed usually, or stderr
+            tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_writer(std::io::stderr)
                 .compact()
                 .with_target(false)
                 .init();
-             
-             match command {
-                 Commands::Completions { shell } => {
+
+            match command {
+                Commands::Completions { shell } => {
                     let mut cmd = Cli::command();
                     clap_complete::generate(shell, &mut cmd, "cass", &mut std::io::stdout());
-                 }
-                 Commands::Man => {
+                }
+                Commands::Man => {
                     let cmd = Cli::command();
                     let man = clap_mangen::Man::new(cmd);
                     man.render(&mut std::io::stdout())?;
-                 }
-                 _ => {}
-             }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -188,8 +205,12 @@ fn run_cli_search(
     let index_path = index_dir(&data_dir)?;
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
 
-    let client = SearchClient::open(&index_path, Some(&db_path))?
-        .ok_or_else(|| anyhow::anyhow!("Index not found at {}. Run 'cass index --full' first.", index_path.display()))?;
+    let client = SearchClient::open(&index_path, Some(&db_path))?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Index not found at {}. Run 'cass index --full' first.",
+            index_path.display()
+        )
+    })?;
 
     let mut filters = SearchFilters::default();
     if !agents.is_empty() {
@@ -210,7 +231,10 @@ fn run_cli_search(
         }
         for hit in hits {
             println!("----------------------------------------------------------------");
-            println!("Score: {:.2} | Agent: {} | WS: {}", hit.score, hit.agent, hit.workspace);
+            println!(
+                "Score: {:.2} | Agent: {} | WS: {}",
+                hit.score, hit.agent, hit.workspace
+            );
             println!("Path: {}", hit.source_path);
             println!("Snippet: {}", hit.snippet.replace('\n', " ").trim());
         }

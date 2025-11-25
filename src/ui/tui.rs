@@ -177,9 +177,9 @@ fn render_help_overlay(frame: &mut Frame, palette: ThemePalette, scroll: u16) {
         .title(Span::styled("Help / Shortcuts", palette.title()))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(palette.accent));
-    
+
     frame.render_widget(ratatui::widgets::Clear, popup_area);
-    
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
