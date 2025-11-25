@@ -34,15 +34,16 @@ install.ps1 -EasyMode -Verify
 - **Tests & CI**: unit, connector fixtures, storage/indexer/search/TUI snapshots, installer e2e (file:// artifacts), headless TUI smoke; CI runs fmt/clippy/check/test + e2e.
 
 ### TUI keymap (current)
-- Search: type to filter; `/` focuses query. `Ctrl-R` cycles query history. `y` copies path (Results) or content (Detail) to clipboard.
-- Navigation: `Up/Down` move selection/scroll; `Left/Right` switch panes (Results) or focus back (Detail); `Tab` toggles focus (Results ⇄ Detail).
-- Detail: `[` / `]` cycles tabs (Messages/Snippets/Raw). `Up/Down` scrolls content when focused.
-- Filters: `F3` agent, `F4` workspace, `F5/F6` time range; `Shift+F3` scope to active agent; `Shift+F4` clear agent scope; `Shift+F5` cycle time presets (24h/7d/30d/all); `F11` clear all filters.
+- Search: type to filter; `/` focuses query. `Ctrl-R` cycles query history. `Ctrl+Shift+R` refreshes search. `y` copies path (Results) or content (Detail) to clipboard.
+- Navigation: `Up/Down` or `j/k` move selection/scroll; `Left/Right` or `h/l` switch panes (Results) or focus back (Detail); `Tab` toggles focus (Results ⇄ Detail). `g/G` jump first/last.
+- Mouse: Click pane/item to select; click detail area to focus. Scroll wheel navigates results or scrolls detail.
+- Detail: `[` / `]` cycles tabs (Messages/Snippets/Raw). `Up/Down/j/k` scrolls content when focused.
+- Filters: `F3` agent (with autocomplete), `F4` workspace, `F5/F6` time range (human-readable: `-7d`, `yesterday`, `2024-11-20`); `Shift+F3` scope to active agent; `Shift+F4` clear agent scope; `Shift+F5` cycle time presets (24h/7d/30d/all); `Ctrl+Del` clear all filters.
 - Modes: `F9` toggles match mode (prefix ↔ standard). `F12` cycles ranking (recent-heavy → balanced → relevance-heavy). `F2` toggles theme.
 - Context: `F7` cycles context window (S/M/L/XL); `Space` temporarily peeks XL then returns.
-- Density: `Shift+=/+` increase per-pane items, `-` decrease (min 4, max 50).
+- Density: `Shift+=/+` increase per-pane items, `-` decrease (min 4, max 50). Auto-adjusts based on terminal height.
 - Actions: `Enter`/`F8` open hit in `$EDITOR`; `Esc`/`F10` quit (or back from Detail focus).
-- Empty state: shows recent per-agent conversations before typing; recent queries list when query is empty.
+- Empty state: shows recent per-agent conversations before typing; recent queries list when query is empty; "Did you mean?" suggestions for typos.
 
 ## 🚀 Quickstart
 1) **Install** (easy-mode shown):

@@ -400,7 +400,7 @@ dependencies = [
 
 [[package]]
 name = "coding-agent-search"
-version = "0.1.19"
+version = "0.1.21"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -430,6 +430,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shell-words",
+ "strsim",
  "tantivy",
  "tempfile",
  "thiserror 1.0.69",

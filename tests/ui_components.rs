@@ -33,9 +33,15 @@ fn search_bar_tips_include_clear_hotkeys() {
         .collect();
     let joined = lines.join("\n");
     eprintln!("bar={joined}");
-    assert!(joined.contains("F3 agent"));
-    assert!(joined.contains("F7 context"));
-    assert!(joined.contains("F11 clear"));
+    // Simplified tips line now shows F1 help, F3-F5 filters, and Ctrl+Del
+    assert!(joined.contains("F1"));
+    assert!(joined.contains("help"));
+    assert!(joined.contains("F3"));
+    assert!(joined.contains("agent"));
+    assert!(joined.contains("F5"));
+    assert!(joined.contains("time"));
+    assert!(joined.contains("Ctrl+Del"));
+    assert!(joined.contains("clear"));
 }
 
 #[test]

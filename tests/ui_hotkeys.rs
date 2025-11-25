@@ -2,8 +2,18 @@ use coding_agent_search::ui::tui::footer_legend;
 
 #[test]
 fn footer_mentions_editor_and_clear_keys() {
-    let long = footer_legend(false);
-    assert!(long.contains("Enter/F8 open"));
-    assert!(long.contains("Ctrl+Del clear"));
-    assert!(long.contains("Esc/F10 quit"));
+    // Simplified footer shows essential keys only
+    let short = footer_legend(false);
+    assert!(
+        short.contains("Enter open"),
+        "short footer should show Enter open"
+    );
+    assert!(
+        short.contains("Esc quit"),
+        "short footer should show Esc quit"
+    );
+    assert!(
+        short.contains("F1 help"),
+        "short footer should show F1 help"
+    );
 }

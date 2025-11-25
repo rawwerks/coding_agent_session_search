@@ -1,12 +1,15 @@
 //! Ratatui-based interface wired to Tantivy search.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use chrono::{DateTime, Datelike, Utc};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+    MouseEventKind,
+};
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{ExecutableCommand, execute};
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap};
@@ -85,6 +88,11 @@ impl ContextWindow {
 struct TuiStatePersisted {
     match_mode: Option<String>,
     context_window: Option<String>,
+    /// Set to true after user dismisses help overlay for the first time.
+    /// Prevents help from auto-showing on subsequent launches.
+    has_seen_help: Option<bool>,
+    /// Recently used search queries, most recent first. Persisted across sessions.
+    query_history: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +100,393 @@ struct AgentPane {
     agent: String,
     hits: Vec<SearchHit>,
     selected: usize,
+    /// Total number of results for this agent (may be more than hits.len() due to limit)
+    total_count: usize,
+}
+
+/// Returns style modifiers based on score magnitude.
+/// High scores (>8) get bold, medium scores (>5) normal, low scores dimmed.
+fn score_style(score: f32) -> Modifier {
+    if score >= 8.0 {
+        Modifier::BOLD
+    } else if score >= 5.0 {
+        Modifier::empty()
+    } else {
+        Modifier::DIM
+    }
+}
+
+/// Creates a visual bar representation of score: `████░░ 8.2`
+/// Uses 5-character bar with filled/empty blocks proportional to score (0-10 scale).
+fn score_bar(score: f32, color: ratatui::style::Color) -> Vec<Span<'static>> {
+    let normalized = (score / 10.0).clamp(0.0, 1.0);
+    let filled = (normalized * 5.0).round() as usize;
+    let empty = 5 - filled;
+    vec![
+        Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(color).add_modifier(score_style(score)),
+        ),
+        Span::styled(
+            "░".repeat(empty),
+            Style::default().fg(color).add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:.1}", score),
+            Style::default().fg(color).add_modifier(score_style(score)),
+        ),
+    ]
+}
+
+/// Linear interpolation between two u8 values.
+/// t=0.0 returns a, t=1.0 returns b.
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)) as u8
+}
+
+/// Interpolates between two colors based on progress (0.0 to 1.0).
+/// For RGB colors, performs smooth linear interpolation.
+/// For non-RGB colors, falls back to binary switch at 50%.
+fn lerp_color(
+    from: ratatui::style::Color,
+    to: ratatui::style::Color,
+    progress: f32,
+) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match (from, to) {
+        (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) => Color::Rgb(
+            lerp_u8(fr, tr, progress),
+            lerp_u8(fg, tg, progress),
+            lerp_u8(fb, tb, progress),
+        ),
+        // Convert named accent colors to approximate RGB values for smooth fades
+        (Color::Rgb(fr, fg, fb), named) => {
+            let (tr, tg, tb) = named_color_to_rgb(named);
+            Color::Rgb(
+                lerp_u8(fr, tr, progress),
+                lerp_u8(fg, tg, progress),
+                lerp_u8(fb, tb, progress),
+            )
+        }
+        (named, Color::Rgb(tr, tg, tb)) => {
+            let (fr, fg, fb) = named_color_to_rgb(named);
+            Color::Rgb(
+                lerp_u8(fr, tr, progress),
+                lerp_u8(fg, tg, progress),
+                lerp_u8(fb, tb, progress),
+            )
+        }
+        // Both named: binary switch at halfway point
+        _ => {
+            if progress < 0.5 {
+                from
+            } else {
+                to
+            }
+        }
+    }
+}
+
+/// Converts named colors to approximate RGB values for interpolation.
+fn named_color_to_rgb(color: ratatui::style::Color) -> (u8, u8, u8) {
+    use ratatui::style::Color;
+    match color {
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::Gray => (128, 128, 128),
+        Color::DarkGray => (85, 85, 85),
+        Color::LightRed => (255, 85, 85),
+        Color::LightGreen => (85, 255, 85),
+        Color::LightYellow => (255, 255, 85),
+        Color::LightBlue => (85, 85, 255),
+        Color::LightMagenta => (255, 85, 255),
+        Color::LightCyan => (85, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(idx) => {
+            // Basic 16-color approximation for indexed colors
+            if idx < 16 {
+                match idx {
+                    0 => (0, 0, 0),
+                    1 => (128, 0, 0),
+                    2 => (0, 128, 0),
+                    3 => (128, 128, 0),
+                    4 => (0, 0, 128),
+                    5 => (128, 0, 128),
+                    6 => (0, 128, 128),
+                    7 => (192, 192, 192),
+                    8 => (128, 128, 128),
+                    9 => (255, 0, 0),
+                    10 => (0, 255, 0),
+                    11 => (255, 255, 0),
+                    12 => (0, 0, 255),
+                    13 => (255, 0, 255),
+                    14 => (0, 255, 255),
+                    15 => (255, 255, 255),
+                    _ => (128, 128, 128),
+                }
+            } else {
+                (128, 128, 128) // Default gray for extended palette
+            }
+        }
+        Color::Reset => (255, 255, 255),
+    }
+}
+
+/// Calculates flash animation progress from 0.0 (just started) to 1.0 (complete).
+/// Returns 1.0 if no flash is active.
+fn flash_progress(flash_until: Option<Instant>, duration_ms: u64) -> f32 {
+    match flash_until {
+        Some(end_time) => {
+            let now = Instant::now();
+            if now >= end_time {
+                1.0 // Animation complete
+            } else {
+                let remaining = end_time.duration_since(now).as_millis() as f32;
+                let total = duration_ms as f32;
+                // Progress is 0.0 at start (full remaining), 1.0 at end (0 remaining)
+                1.0 - (remaining / total).clamp(0.0, 1.0)
+            }
+        }
+        None => 1.0, // No flash active
+    }
+}
+
+/// Truncates a file path for display, preserving readability.
+/// - Replaces home directory with ~
+/// - Keeps first and last path components for context
+/// - Uses "..." in the middle for long paths
+fn truncate_path(path: &str, max_len: usize) -> String {
+    // Replace home directory with ~
+    let home = dirs::home_dir()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let display_path = if !home.is_empty() && path.starts_with(&home) {
+        format!("~{}", &path[home.len()..])
+    } else {
+        path.to_string()
+    };
+
+    // If it fits, return as-is
+    if display_path.len() <= max_len {
+        return display_path;
+    }
+
+    // Split path into non-empty components
+    let parts: Vec<&str> = display_path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // Need at least 3 parts to truncate meaningfully
+    if parts.len() <= 2 {
+        // Just truncate from the right
+        let ellipsis = "...";
+        let available = max_len.saturating_sub(ellipsis.len());
+        return format!(
+            "{}{}",
+            &display_path[..available.min(display_path.len())],
+            ellipsis
+        );
+    }
+
+    // Determine the leading prefix based on path type
+    let prefix = if display_path.starts_with('~') {
+        "~"
+    } else if display_path.starts_with('/') {
+        "" // Will add / in format string
+    } else {
+        parts[0] // Relative path, use first component
+    };
+
+    // For absolute/home paths, use all parts; for relative, skip first (already in prefix)
+    let skip_first = !display_path.starts_with('/') && !display_path.starts_with('~');
+    let relevant_parts: Vec<&str> = if skip_first {
+        parts[1..].to_vec()
+    } else {
+        parts.clone()
+    };
+
+    let second_last = relevant_parts
+        .get(relevant_parts.len().saturating_sub(2))
+        .unwrap_or(&"");
+    let last = relevant_parts.last().unwrap_or(&"");
+
+    // Build truncated path
+    let truncated = if display_path.starts_with('/') {
+        format!("/.../{}/{}", second_last, last)
+    } else if display_path.starts_with('~') {
+        format!("~/.../{}/{}", second_last, last)
+    } else {
+        format!("{}/.../{}/{}", prefix, second_last, last)
+    };
+
+    // If truncated is still too long, fall back to just showing the filename
+    if truncated.len() > max_len && !last.is_empty() {
+        let result = format!(".../{}", last);
+        if result.len() <= max_len {
+            return result;
+        }
+        // Last resort: truncate the filename itself
+        let available = max_len.saturating_sub(4); // ".../"
+        return format!(".../{}", &last[..available.min(last.len())]);
+    }
+
+    truncated
+}
+
+/// Generates contextual empty state messages with actionable suggestions.
+/// The suggestions are tailored based on the current query, filters, and search mode.
+fn contextual_empty_state(
+    query: &str,
+    filters: &SearchFilters,
+    match_mode: MatchMode,
+    palette: ThemePalette,
+    fuzzy_suggestion: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Show the query they searched for
+    if query.trim().is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No results found".to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from("Start typing to search your conversations."));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "No results for ".to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("\"{}\"", query),
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Show "Did you mean?" suggestion if available
+        if let Some(suggestion) = fuzzy_suggestion {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Did you mean: ".to_string(),
+                    Style::default().fg(palette.hint),
+                ),
+                Span::styled(
+                    format!("\"{}\"", suggestion),
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                ),
+                Span::styled(" ?".to_string(), Style::default().fg(palette.hint)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    // Build contextual suggestions
+    let mut suggestions: Vec<String> = Vec::new();
+
+    // Agent filter suggestion
+    if !filters.agents.is_empty() {
+        let agents: Vec<_> = filters.agents.iter().cloned().collect();
+        let agent_str = if agents.len() > 1 {
+            format!("{} agents", agents.len())
+        } else {
+            agents.first().cloned().unwrap_or_default()
+        };
+        suggestions.push(format!("Clear agent filter: {} (Shift+F3)", agent_str));
+    }
+
+    // Workspace filter suggestion
+    if !filters.workspaces.is_empty() {
+        suggestions.push("Clear workspace filter (Shift+F4)".to_string());
+    }
+
+    // Time filter suggestion
+    if filters.created_from.is_some() || filters.created_to.is_some() {
+        suggestions.push("Remove time filter (Ctrl+Del clears all)".to_string());
+    }
+
+    // Match mode suggestion
+    if matches!(match_mode, MatchMode::Standard) {
+        suggestions.push("Try prefix mode for partial matches (F9)".to_string());
+    }
+
+    // Query-based suggestions
+    if query.len() > 20 {
+        suggestions.push("Try shorter, more specific search terms".to_string());
+    }
+
+    if query.contains(' ') && query.split_whitespace().count() > 3 {
+        suggestions.push("Try fewer keywords".to_string());
+    }
+
+    // If still no suggestions, add generic ones
+    if suggestions.is_empty() {
+        suggestions.push("Check spelling".to_string());
+        suggestions.push("Try different keywords".to_string());
+        suggestions.push("Run 'cass index --full' to ensure all data is indexed".to_string());
+    }
+
+    // Render suggestions
+    lines.push(Line::from(Span::styled(
+        "Suggestions:".to_string(),
+        Style::default().fg(palette.accent),
+    )));
+    for s in suggestions {
+        lines.push(Line::from(format!("  • {}", s)));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press Ctrl+Del to clear all filters".to_string(),
+        Style::default().fg(palette.hint),
+    )));
+
+    lines
+}
+
+/// Formats a timestamp as a relative time string ("2h ago", "3d ago", etc.)
+/// Falls back to absolute date for timestamps older than 30 days.
+fn format_relative_time(timestamp_ms: i64) -> String {
+    let now = Utc::now().timestamp_millis();
+    let diff_ms = now - timestamp_ms;
+
+    if diff_ms < 0 {
+        return "in the future".to_string();
+    }
+
+    let seconds = diff_ms / 1000;
+    let minutes = seconds / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+
+    if seconds < 60 {
+        "just now".to_string()
+    } else if minutes < 60 {
+        format!("{}m ago", minutes)
+    } else if hours < 24 {
+        format!("{}h ago", hours)
+    } else if days < 7 {
+        format!("{}d ago", days)
+    } else if days < 30 {
+        format!("{}w ago", days / 7)
+    } else {
+        // For older timestamps, show absolute date
+        DateTime::from_timestamp_millis(timestamp_ms)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
@@ -109,7 +504,10 @@ fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
 
     lines.extend(add_section(
         "Search",
-        &["type to live-search; / focuses query; Ctrl-R cycles history"],
+        &[
+            "type to live-search; / focuses query; Ctrl-R cycles history",
+            "Ctrl+Shift+R refresh search (re-query index)",
+        ],
     ));
     lines.extend(add_section(
         "Filters",
@@ -142,9 +540,17 @@ fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
         "Navigation",
         &[
             "Arrows move; Left/Right pane; PgUp/PgDn page",
+            "Vim: h/j/k/l (left/down/up/right) when results showing",
             "Alt+NumPad 1-9 jump pane; g/G jump first/last item",
             "Tab toggles focus (Results ⇄ Detail)",
             "[ / ] cycle detail tabs (Messages/Snippets/Raw)",
+        ],
+    ));
+    lines.extend(add_section(
+        "Mouse",
+        &[
+            "Click pane/item to select; click detail area to focus",
+            "Scroll wheel: navigate results or scroll detail",
         ],
     ));
     lines.extend(add_section(
@@ -217,7 +623,42 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     horizontal[1]
 }
 
+/// Calculate optimal items per pane based on terminal height.
+///
+/// Layout overhead (approximate):
+/// - 1 line top margin
+/// - 3 lines search bar (border + query + tips)
+/// - 1 line filter pills
+/// - 2 lines pane borders (top + bottom)
+/// - 1 line footer
+/// - 1 line bottom margin
+///
+/// Total: ~9 lines overhead.
+/// Results area is 70% of remaining height.
+/// Each item is ~2 lines (title + snippet).
+fn calculate_pane_limit(terminal_height: u16) -> usize {
+    const OVERHEAD: u16 = 9;
+    const RESULTS_PERCENT: f32 = 0.70;
+    const LINES_PER_ITEM: usize = 2;
+    const MIN_ITEMS: usize = 4;
+    const MAX_ITEMS: usize = 50;
+
+    let available = terminal_height.saturating_sub(OVERHEAD);
+    let results_height = (available as f32 * RESULTS_PERCENT) as usize;
+    let items = results_height / LINES_PER_ITEM;
+    items.clamp(MIN_ITEMS, MAX_ITEMS)
+}
+
 fn build_agent_panes(results: &[SearchHit], per_pane_limit: usize) -> Vec<AgentPane> {
+    use std::collections::HashMap;
+
+    // First pass: count total hits per agent
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for hit in results {
+        *counts.entry(hit.agent.clone()).or_insert(0) += 1;
+    }
+
+    // Second pass: build panes with limit
     let mut panes: Vec<AgentPane> = Vec::new();
     for hit in results {
         if let Some(pane) = panes.iter_mut().find(|p| p.agent == hit.agent) {
@@ -229,6 +670,7 @@ fn build_agent_panes(results: &[SearchHit], per_pane_limit: usize) -> Vec<AgentP
                 agent: hit.agent.clone(),
                 hits: vec![hit.clone()],
                 selected: 0,
+                total_count: *counts.get(&hit.agent).unwrap_or(&1),
             });
         }
     }
@@ -239,6 +681,51 @@ fn active_hit(panes: &[AgentPane], active_idx: usize) -> Option<&SearchHit> {
     panes
         .get(active_idx)
         .and_then(|pane| pane.hits.get(pane.selected))
+}
+
+/// Known agent slugs for autocomplete suggestions
+const KNOWN_AGENTS: &[&str] = &[
+    "claude_code",
+    "codex",
+    "cline",
+    "gemini",
+    "gemini_cli",
+    "amp",
+    "opencode",
+];
+
+/// Returns agent suggestions matching the given prefix (case-insensitive)
+fn agent_suggestions(prefix: &str) -> Vec<&'static str> {
+    let prefix_lower = prefix.to_lowercase();
+    KNOWN_AGENTS
+        .iter()
+        .filter(|agent| agent.to_lowercase().starts_with(&prefix_lower))
+        .copied()
+        .collect()
+}
+
+/// Suggests a correction for a query based on history.
+/// Uses Levenshtein distance to find close matches (max edit distance 2).
+/// Only suggests if the history item is different from the query.
+fn suggest_correction(query: &str, history: &std::collections::VecDeque<String>) -> Option<String> {
+    use strsim::levenshtein;
+
+    if query.len() < 3 {
+        return None; // Don't suggest for very short queries
+    }
+
+    let query_lower = query.to_lowercase();
+
+    history
+        .iter()
+        .filter(|h| {
+            let h_lower = h.to_lowercase();
+            // Must be different from query (otherwise it's not a correction)
+            // and within edit distance 2
+            h.len() >= 3 && h_lower != query_lower && levenshtein(&query_lower, &h_lower) <= 2
+        })
+        .min_by_key(|h| levenshtein(&query_lower, &h.to_lowercase()))
+        .cloned()
 }
 
 fn agent_display_name(agent: &str) -> String {
@@ -293,7 +780,7 @@ fn state_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span> = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
     if !filters.agents.is_empty() {
         spans.push(Span::styled(
             format!(
@@ -304,7 +791,7 @@ fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span
                 .fg(palette.accent_alt)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::raw(" "));
+        spans.push(Span::raw(" ".to_string()));
     }
     if !filters.workspaces.is_empty() {
         spans.push(Span::styled(
@@ -319,22 +806,19 @@ fn chips_for_filters(filters: &SearchFilters, palette: ThemePalette) -> Vec<Span
             ),
             Style::default().fg(palette.accent_alt),
         ));
-        spans.push(Span::raw(" "));
+        spans.push(Span::raw(" ".to_string()));
     }
     if filters.created_from.is_some() || filters.created_to.is_some() {
-        spans.push(Span::styled(
-            format!(
-                "[time:{:?}->{:?}]",
-                filters.created_from, filters.created_to
-            ),
-            Style::default().fg(palette.accent_alt),
-        ));
-        spans.push(Span::raw(" "));
+        let chip_text = format_time_chip(filters.created_from, filters.created_to);
+        if !chip_text.is_empty() {
+            spans.push(Span::styled(
+                chip_text,
+                Style::default().fg(palette.accent_alt),
+            ));
+            spans.push(Span::raw(" ".to_string()));
+        }
     }
     spans
-        .into_iter()
-        .map(|s| unsafe { std::mem::transmute::<Span<'_>, Span<'static>>(s) })
-        .collect()
 }
 
 fn load_state(path: &std::path::Path) -> TuiStatePersisted {
@@ -375,11 +859,10 @@ fn highlight_terms_owned_with_style(
     base: Style,
 ) -> Line<'static> {
     let owned = text;
-    let mut spans = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
     if query.trim().is_empty() {
         spans.push(Span::styled(owned, base));
-        let line: Line = spans.into();
-        return unsafe { std::mem::transmute::<Line, Line<'static>>(line) };
+        return Line::from(spans);
     }
     let lower = owned.to_lowercase();
     let q = query.to_lowercase();
@@ -403,14 +886,132 @@ fn highlight_terms_owned_with_style(
     if idx < owned.len() {
         spans.push(Span::styled(owned[idx..].to_string(), base));
     }
-    let line: Line = spans.into();
-    unsafe { std::mem::transmute::<Line, Line<'static>>(line) }
+    Line::from(spans)
 }
 
-fn format_ts(ms: i64) -> String {
+/// Format a timestamp as a short human-readable date for filter chips.
+/// Shows "Nov 25" for same year, "Nov 25, 2023" for other years.
+fn format_time_short(ms: i64) -> String {
+    let now = Utc::now();
     DateTime::<Utc>::from_timestamp_millis(ms)
-        .map(|dt: DateTime<Utc>| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| ms.to_string())
+        .map(|dt| {
+            if dt.year() == now.year() {
+                dt.format("%b %d").to_string() // "Nov 25"
+            } else {
+                dt.format("%b %d, %Y").to_string() // "Nov 25, 2023"
+            }
+        })
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Format time filter range as readable chip text.
+fn format_time_chip(from: Option<i64>, to: Option<i64>) -> String {
+    match (from, to) {
+        (Some(f), Some(t)) => format!(
+            "[time: {} → {}]",
+            format_time_short(f),
+            format_time_short(t)
+        ),
+        (Some(f), None) => format!("[time: {} → now]", format_time_short(f)),
+        (None, Some(t)) => format!("[time: start → {}]", format_time_short(t)),
+        (None, None) => String::new(),
+    }
+}
+
+/// Parse human-readable time input into milliseconds since epoch.
+///
+/// Accepts multiple formats:
+/// - Relative: `-7d` (7 days ago), `-24h` (24 hours), `-1w` (1 week), `-30m` (30 minutes)
+/// - Keywords: `yesterday`, `today`, `now`
+/// - ISO dates: `2024-11-25`, `2024-11-25T14:30:00`
+/// - Numeric: milliseconds if >= 10^12, otherwise seconds
+///
+/// Returns None if the input cannot be parsed.
+fn parse_time_input(input: &str) -> Option<i64> {
+    let input = input.trim().to_lowercase();
+    if input.is_empty() {
+        return None;
+    }
+
+    let now = Utc::now();
+    let now_ms = now.timestamp_millis();
+
+    // Relative time formats: -7d, -24h, -1w, -30m
+    if let Some(rest) = input.strip_prefix('-') {
+        if let Some((num_str, unit)) = rest
+            .char_indices()
+            .find(|(_, c)| c.is_alphabetic())
+            .map(|(i, _)| (&rest[..i], &rest[i..]))
+            && let Ok(num) = num_str.parse::<i64>()
+        {
+            let ms_per_unit = match unit {
+                "m" | "min" | "mins" | "minute" | "minutes" => 60 * 1000,
+                "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60 * 1000,
+                "d" | "day" | "days" => 24 * 60 * 60 * 1000,
+                "w" | "wk" | "wks" | "week" | "weeks" => 7 * 24 * 60 * 60 * 1000,
+                _ => return None,
+            };
+            return Some(now_ms - num * ms_per_unit);
+        }
+        return None;
+    }
+
+    // Keyword shortcuts
+    match input.as_str() {
+        "now" => return Some(now_ms),
+        "today" => {
+            let start_of_today = now.date_naive().and_hms_opt(0, 0, 0)?;
+            return Some(start_of_today.and_utc().timestamp_millis());
+        }
+        "yesterday" => {
+            let yesterday = now.date_naive().pred_opt()?.and_hms_opt(0, 0, 0)?;
+            return Some(yesterday.and_utc().timestamp_millis());
+        }
+        _ => {}
+    }
+
+    // Try ISO date formats
+    // Full ISO-8601 with time: 2024-11-25T14:30:00Z or 2024-11-25T14:30:00
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&input) {
+        return Some(dt.timestamp_millis());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&input, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt.and_utc().timestamp_millis());
+    }
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&input, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc().timestamp_millis());
+    }
+
+    // Date only: 2024-11-25 -> start of that day
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(&input, "%Y-%m-%d") {
+        let dt = date.and_hms_opt(0, 0, 0)?;
+        return Some(dt.and_utc().timestamp_millis());
+    }
+
+    // Short date formats: 11/25/2024 or 11-25-2024
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(&input, "%m/%d/%Y") {
+        let dt = date.and_hms_opt(0, 0, 0)?;
+        return Some(dt.and_utc().timestamp_millis());
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(&input, "%m-%d-%Y") {
+        let dt = date.and_hms_opt(0, 0, 0)?;
+        return Some(dt.and_utc().timestamp_millis());
+    }
+
+    // Numeric: try parsing as number
+    if let Ok(n) = input.parse::<i64>() {
+        // Heuristic: timestamps >= 10^12 are milliseconds, otherwise seconds
+        // (10^12 ms = Sep 2001, reasonable cutoff)
+        if n >= 1_000_000_000_000 {
+            return Some(n); // Already milliseconds
+        } else if n >= 1_000_000_000 {
+            return Some(n * 1000); // Convert seconds to milliseconds
+        }
+        // Small numbers are probably not valid timestamps
+        return None;
+    }
+
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,9 +1022,9 @@ enum FocusRegion {
 
 pub fn footer_legend(show_help: bool) -> &'static str {
     if show_help {
-        "Esc/F10 quit • arrows + Left/Right pane • PgUp/PgDn page • Tab Focus • [ / ] Tabs • F3/F4/F5/F6 filters • Ctrl+Del clear • F7 context • F9 mode • F2 theme • Enter/F8 open • Alt+NumPad 1-9 pane • Ctrl-R history • y copy"
+        "Esc quit • arrows nav • Tab focus • Enter open • F1-F9 commands • Ctrl-R history • y copy"
     } else {
-        "F1 help | F3 agent | F4 workspace | F5/F6 time | F7 context | Ctrl+Del clear | F9 mode | F2 theme | Enter/F8 open | Alt+NumPad pane | y copy | Esc/F10 quit"
+        "F1 help | Enter open | Esc quit"
     }
 }
 
@@ -438,7 +1039,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
 
     let mut stdout = io::stdout();
     enable_raw_mode()?;
-    stdout.execute(EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -456,7 +1057,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
         )
     } else {
         format!(
-            "Index not present at {}. Run `coding-agent-search index --full` then reopen TUI.",
+            "Index not present at {}. Run `cass index --full` then reopen TUI.",
             index_path.display()
         )
     };
@@ -466,11 +1067,16 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     let mut input_mode = InputMode::Query;
     let mut input_buffer = String::new();
     let page_size: usize = 120;
-    let mut per_pane_limit: usize = 12;
+    // Calculate initial pane limit based on terminal height
+    let initial_height = terminal.size().map(|r| r.height).unwrap_or(24);
+    let mut per_pane_limit: usize = calculate_pane_limit(initial_height);
+    let mut last_terminal_height: u16 = initial_height;
     let mut page: usize = 0;
     let mut results: Vec<SearchHit> = Vec::new();
     let mut panes: Vec<AgentPane> = Vec::new();
     let mut active_pane: usize = 0;
+    const MAX_VISIBLE_PANES: usize = 4;
+    let mut pane_scroll_offset: usize = 0; // First visible pane index
     let mut focus_region = FocusRegion::Results;
     let mut detail_scroll: u16 = 0;
     let mut focus_flash_until: Option<Instant> = None;
@@ -478,15 +1084,23 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     let tick_rate = Duration::from_millis(30);
     let debounce = Duration::from_millis(60);
     let mut dirty_since: Option<Instant> = Some(Instant::now());
+    // Loading spinner state
+    let mut spinner_frame: usize = 0;
+    const SPINNER_CHARS: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
 
     let mut detail_tab = DetailTab::Messages;
     let mut theme_dark = true;
-    // Show onboarding overlay on first launch; user can dismiss with F1.
-    let mut show_help = true;
+    // Show onboarding overlay only on first launch (when has_seen_help is not set).
+    // After user dismisses with F1, we persist has_seen_help=true to avoid showing again.
+    let mut show_help = !persisted.has_seen_help.unwrap_or(false);
     let mut cached_detail: Option<(String, ConversationView)> = None;
     let mut last_query = String::new();
     let mut needs_draw = true;
-    let mut query_history: VecDeque<String> = VecDeque::new();
+    // Load query history from persisted state, or start fresh
+    let mut query_history: VecDeque<String> = persisted
+        .query_history
+        .map(VecDeque::from)
+        .unwrap_or_default();
     let history_cap: usize = 50;
     let mut history_cursor: Option<usize> = None;
     let mut suggestion_idx: Option<usize> = None;
@@ -508,7 +1122,24 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     let editor_line_flag = std::env::var("EDITOR_LINE_FLAG").unwrap_or_else(|_| "+".into());
 
+    // Mouse support: track layout regions for click/scroll handling
+    let mut last_detail_area: Option<Rect> = None;
+    let mut last_pane_rects: Vec<Rect> = Vec::new();
+
     loop {
+        // Check for terminal resize and recalculate pane limit if needed
+        if let Ok(size) = terminal.size()
+            && size.height != last_terminal_height
+        {
+            last_terminal_height = size.height;
+            let new_limit = calculate_pane_limit(size.height);
+            if new_limit != per_pane_limit {
+                per_pane_limit = new_limit;
+                panes = build_agent_panes(&results, per_pane_limit);
+                needs_draw = true;
+            }
+        }
+
         if needs_draw {
             terminal.draw(|f| {
                 let palette = if theme_dark {
@@ -522,8 +1153,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     .margin(1)
                     .constraints(
                         [
-                            Constraint::Length(3), // search bar
-                            Constraint::Length(1), // filter pills
+                            Constraint::Length(3), // search bar (includes filter chips)
                             Constraint::Min(0),    // results + detail
                             Constraint::Length(1), // footer
                         ]
@@ -535,8 +1165,8 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     InputMode::Query => query.as_str().to_string(),
                     InputMode::Agent => format!("[agent] {}", input_buffer),
                     InputMode::Workspace => format!("[workspace] {}", input_buffer),
-                    InputMode::CreatedFrom => format!("[from ts ms] {}", input_buffer),
-                    InputMode::CreatedTo => format!("[to ts ms] {}", input_buffer),
+                    InputMode::CreatedFrom => format!("[from] {}", input_buffer),
+                    InputMode::CreatedTo => format!("[to] {}", input_buffer),
                 };
                 let mode_label = match match_mode {
                     MatchMode::Standard => "standard",
@@ -546,62 +1176,31 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 let sb = search_bar(&bar_text, palette, input_mode, mode_label, chips);
                 f.render_widget(sb, chunks[0]);
 
-                // Filter pills row
-                let mut pill_spans = Vec::new();
-                if !filters.agents.is_empty() {
-                    pill_spans.push(Span::styled(
-                        format!(
-                            "[F3] agent:{}",
-                            filters.agents.iter().cloned().collect::<Vec<_>>().join("|")
-                        ),
-                        Style::default()
-                            .fg(palette.accent_alt)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    pill_spans.push(Span::raw("  "));
-                }
-                if !filters.workspaces.is_empty() {
-                    pill_spans.push(Span::styled(
-                        format!(
-                            "[F4] ws:{}",
-                            filters
-                                .workspaces
-                                .iter()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("|")
-                        ),
-                        Style::default().fg(palette.accent_alt),
-                    ));
-                    pill_spans.push(Span::raw("  "));
-                }
-                if filters.created_from.is_some() || filters.created_to.is_some() {
-                    pill_spans.push(Span::styled(
-                        format!(
-                            "[F5/F6] time:{:?}->{:?}",
-                            filters.created_from, filters.created_to
-                        ),
-                        Style::default().fg(palette.accent_alt),
-                    ));
-                }
-                if pill_spans.is_empty() {
-                    pill_spans.push(Span::styled(
-                        "filters: none (press F3/F4/F5/F6)",
-                        Style::default().fg(palette.hint),
-                    ));
-                }
-                let pill_para = Paragraph::new(Line::from(pill_spans));
-                f.render_widget(pill_para, chunks[1]);
-
+                // Responsive layout: detail pane expands when focused
+                let (results_pct, detail_pct) = match focus_region {
+                    FocusRegion::Results => (70, 30),
+                    FocusRegion::Detail => (50, 50),
+                };
                 let main_split = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(70), Constraint::Percentage(30)].as_ref())
-                    .split(chunks[2]);
+                    .constraints(
+                        [
+                            Constraint::Percentage(results_pct),
+                            Constraint::Percentage(detail_pct),
+                        ]
+                        .as_ref(),
+                    )
+                    .split(chunks[1]);
 
                 let results_area = main_split[0];
                 let detail_area = main_split[1];
 
+                // Save layout for mouse hit testing
+                last_detail_area = Some(detail_area);
+
                 if panes.is_empty() {
+                    // Clear pane rects when no panes (avoid stale click detection)
+                    last_pane_rects.clear();
                     let mut lines: Vec<Line> = Vec::new();
                     if query.trim().is_empty() && !query_history.is_empty() {
                         lines.push(Line::from(Span::styled(
@@ -622,38 +1221,32 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             )));
                         }
                     } else {
-                        lines.push(Line::from("No results found."));
-
-                        // Zero-hit suggestions
-                        let mut suggestions = Vec::new();
-                        if !filters.agents.is_empty() {
-                            suggestions.push("Clear agent filter (Shift+F3)");
-                        }
-                        if !filters.workspaces.is_empty() {
-                            suggestions.push("Clear workspace filter (Shift+F4)");
-                        }
-                        if matches!(match_mode, MatchMode::Standard) {
-                            suggestions.push("Try prefix mode (F9)");
-                        }
-                        if !suggestions.is_empty() {
-                            lines.push(Line::from(""));
-                            lines.push(Line::from(Span::styled("Suggestions:", palette.title())));
-                            for s in suggestions {
-                                lines.push(Line::from(format!("• {s}")));
-                            }
-                        }
-
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(Span::raw(
-                            "Tip: toggle F9 prefix mode or clear all filters with Ctrl+Del",
-                        )));
+                        // Check for fuzzy suggestion from query history
+                        let fuzzy = suggest_correction(&last_query, &query_history);
+                        // Use contextual empty state with helpful suggestions
+                        lines.extend(contextual_empty_state(
+                            &last_query,
+                            &filters,
+                            match_mode,
+                            palette,
+                            fuzzy.as_deref(),
+                        ));
                     }
 
                     let block = Block::default().title("Results").borders(Borders::ALL);
                     f.render_widget(Paragraph::new(lines).block(block), results_area);
                 } else {
-                    let pane_width = (100 / std::cmp::max(panes.len(), 1)) as u16;
-                    let pane_constraints: Vec<Constraint> = panes
+                    // Cap visible panes at MAX_VISIBLE_PANES
+                    // Safety: clamp scroll offset to valid range to prevent slice panic
+                    let safe_scroll_offset =
+                        pane_scroll_offset.min(panes.len().saturating_sub(1).max(0));
+                    let visible_end = (safe_scroll_offset + MAX_VISIBLE_PANES).min(panes.len());
+                    let visible_panes: Vec<&AgentPane> =
+                        panes[safe_scroll_offset..visible_end].iter().collect();
+                    let hidden_count = panes.len().saturating_sub(MAX_VISIBLE_PANES);
+
+                    let pane_width = (100 / std::cmp::max(visible_panes.len(), 1)) as u16;
+                    let pane_constraints: Vec<Constraint> = visible_panes
                         .iter()
                         .map(|_| Constraint::Percentage(pane_width))
                         .collect();
@@ -662,7 +1255,11 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         .constraints(pane_constraints)
                         .split(results_area);
 
-                    for (idx, pane) in panes.iter().enumerate() {
+                    // Save pane rects for mouse hit testing
+                    last_pane_rects = pane_chunks.iter().copied().collect();
+
+                    for (vis_idx, pane) in visible_panes.iter().enumerate() {
+                        let idx = safe_scroll_offset + vis_idx;
                         let theme = ThemePalette::agent_pane(&pane.agent);
                         let mut state = ListState::default();
                         state.select(Some(pane.selected));
@@ -676,21 +1273,21 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 } else {
                                     hit.title.as_str()
                                 };
-                                let header = Line::from(vec![
-                                    Span::styled(
-                                        format!("{:.1}", hit.score),
-                                        Style::default().fg(theme.accent),
-                                    ),
-                                    Span::raw(" "),
-                                    Span::styled(
-                                        title.to_string(),
-                                        Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-                                    ),
-                                ]);
+                                // Build header with score bar visualization
+                                let mut header_spans = score_bar(hit.score, theme.accent);
+                                header_spans.push(Span::raw(" "));
+                                header_spans.push(Span::styled(
+                                    title.to_string(),
+                                    Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                                ));
+                                let header = Line::from(header_spans);
+                                // Truncate paths for display (max 40 chars each)
+                                let truncated_source = truncate_path(&hit.source_path, 40);
                                 let location = if hit.workspace.is_empty() {
-                                    hit.source_path.clone()
+                                    truncated_source
                                 } else {
-                                    format!("{} ({})", hit.source_path, hit.workspace)
+                                    let truncated_ws = truncate_path(&hit.workspace, 30);
+                                    format!("{} ({})", truncated_source, truncated_ws)
                                 };
                                 let raw_snippet =
                                     contextual_snippet(&hit.content, &last_query, context_window);
@@ -704,23 +1301,33 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             })
                             .collect();
 
-                        let flash_active = focus_flash_until
-                            .map(|t| t > Instant::now())
-                            .unwrap_or(false)
-                            && idx == active_pane;
+                        const FLASH_DURATION_MS: u64 = 220;
+
+                        // Calculate smooth flash progress (0.0 = start/accent, 1.0 = end/normal)
+                        let flash_progress_value = if idx == active_pane {
+                            flash_progress(focus_flash_until, FLASH_DURATION_MS)
+                        } else {
+                            1.0 // No flash for non-active panes
+                        };
+
+                        // Interpolate colors: accent → bg for background, bg → fg for foreground
+                        let flash_bg = lerp_color(theme.accent, theme.bg, flash_progress_value);
+                        let flash_fg = lerp_color(theme.bg, theme.fg, flash_progress_value);
 
                         let is_focused_pane = match focus_region {
                             FocusRegion::Results => idx == active_pane,
                             FocusRegion::Detail => false,
                         };
 
+                        // Show "X/Y" when there are more results than displayed
+                        let count_display = if pane.total_count > pane.hits.len() {
+                            format!("{}/{}", pane.hits.len(), pane.total_count)
+                        } else {
+                            pane.hits.len().to_string()
+                        };
                         let block = Block::default()
                             .title(Span::styled(
-                                format!(
-                                    "{} ({})",
-                                    agent_display_name(&pane.agent),
-                                    pane.hits.len()
-                                ),
+                                format!("{} ({})", agent_display_name(&pane.agent), count_display),
                                 Style::default().fg(theme.accent).add_modifier(
                                     if is_focused_pane {
                                         Modifier::BOLD
@@ -735,11 +1342,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             } else {
                                 palette.hint
                             }))
-                            .style(
-                                Style::default()
-                                    .bg(if flash_active { theme.accent } else { theme.bg })
-                                    .fg(if flash_active { theme.bg } else { theme.fg }),
-                            );
+                            .style(Style::default().bg(flash_bg).fg(flash_fg));
 
                         let list = List::new(items)
                             .block(block)
@@ -755,9 +1358,32 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             )
                             .style(Style::default().bg(theme.bg).fg(theme.fg));
 
-                        if let Some(area) = pane_chunks.get(idx) {
+                        if let Some(area) = pane_chunks.get(vis_idx) {
                             f.render_stateful_widget(list, *area, &mut state);
                         }
+                    }
+
+                    // Show "+N more" indicator if there are hidden panes
+                    if hidden_count > 0 {
+                        let indicator =
+                            format!(" [{} of {} agents] ", visible_panes.len(), panes.len());
+                        let indicator_span = Span::styled(
+                            indicator,
+                            Style::default()
+                                .fg(palette.hint)
+                                .add_modifier(Modifier::DIM),
+                        );
+                        // Render in bottom-right corner of results area
+                        let indicator_area = Rect::new(
+                            results_area.x
+                                + results_area
+                                    .width
+                                    .saturating_sub(indicator_span.content.len() as u16 + 2),
+                            results_area.y + results_area.height.saturating_sub(1),
+                            indicator_span.content.len() as u16 + 2,
+                            1,
+                        );
+                        f.render_widget(Paragraph::new(indicator_span), indicator_area);
                     }
                 }
 
@@ -765,7 +1391,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     let tabs = ["Messages", "Snippets", "Raw"];
                     let tab_titles: Vec<Line> = tabs
                         .iter()
-                        .map(|t| Line::from(Span::styled(*t, palette.title())))
+                        .map(|t| Line::from(Span::styled(*t, Style::default().fg(palette.hint))))
                         .collect();
                     let tab_widget = Tabs::new(tab_titles)
                         .select(match detail_tab {
@@ -773,7 +1399,12 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                             DetailTab::Snippets => 1,
                             DetailTab::Raw => 2,
                         })
-                        .highlight_style(Style::default().fg(palette.accent));
+                        .highlight_style(
+                            Style::default()
+                                .fg(palette.accent)
+                                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                        )
+                        .divider(" │ ");
 
                     let mut meta_lines = Vec::new();
                     let agent_theme = ThemePalette::agent_pane(&hit.agent);
@@ -793,12 +1424,12 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         Span::raw(if hit.workspace.is_empty() {
                             "(none)".into()
                         } else {
-                            hit.workspace.clone()
+                            truncate_path(&hit.workspace, 60)
                         }),
                     ]));
                     meta_lines.push(Line::from(vec![
                         Span::styled("Source: ", Style::default().fg(palette.hint)),
-                        Span::raw(hit.source_path.clone()),
+                        Span::raw(truncate_path(&hit.source_path, 60)),
                     ]));
                     meta_lines.push(Line::from(format!("Score: {:.2}", hit.score)));
                     meta_lines.push(Line::from(""));
@@ -832,7 +1463,7 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                     };
                                     let ts = msg
                                         .created_at
-                                        .map(|t| format!(" ({})", format_ts(t)))
+                                        .map(|t| format!(" ({})", format_relative_time(t)))
                                         .unwrap_or_default();
                                     lines.push(Line::from(vec![
                                         Span::styled(
@@ -953,8 +1584,23 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     };
 
                     let is_focused_detail = matches!(focus_region, FocusRegion::Detail);
+                    // Build detail block title with scroll indicator and tab hints
+                    let detail_title = if detail_scroll > 0 {
+                        format!("Detail ↓{} • [ ] tabs", detail_scroll)
+                    } else if is_focused_detail {
+                        "Detail • [ ] tabs • j/k scroll".to_string()
+                    } else {
+                        "Detail • [ ] tabs".to_string()
+                    };
                     let block = Block::default()
-                        .title("Detail")
+                        .title(Span::styled(
+                            detail_title,
+                            Style::default().fg(if is_focused_detail {
+                                palette.accent
+                            } else {
+                                palette.hint
+                            }),
+                        ))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(if is_focused_detail {
                             palette.accent
@@ -985,30 +1631,47 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     );
                 }
 
-                let mut footer_line = format!(
-                    "{} | mode:{} | rank:{} | ctx:{}({}) | {}",
-                    status,
-                    match match_mode {
-                        MatchMode::Standard => "standard",
-                        MatchMode::Prefix => "prefix",
-                    },
-                    match ranking_mode {
-                        RankingMode::RecentHeavy => "recent",
-                        RankingMode::Balanced => "balanced",
-                        RankingMode::RelevanceHeavy => "relevance",
-                    },
-                    context_window.label(),
-                    context_window.size(),
-                    footer_legend(show_help)
-                );
+                // Simplified footer: status + non-default modes + legend
+                let mut footer_parts: Vec<String> = vec![];
+                // Show spinner when search is pending
+                if dirty_since.is_some() {
+                    let spinner = SPINNER_CHARS[spinner_frame % SPINNER_CHARS.len()];
+                    footer_parts.push(format!("{} Searching...", spinner));
+                } else if !status.is_empty() {
+                    footer_parts.push(status.clone());
+                }
+                // Only show mode if non-default (default is Prefix)
+                if matches!(match_mode, MatchMode::Standard) {
+                    footer_parts.push("mode:standard".to_string());
+                }
+                // Only show ranking if non-default (default is Balanced)
+                match ranking_mode {
+                    RankingMode::RecentHeavy => footer_parts.push("rank:recent".to_string()),
+                    RankingMode::RelevanceHeavy => footer_parts.push("rank:relevance".to_string()),
+                    RankingMode::Balanced => {}
+                }
+                // Only show context if non-default (default is Medium)
+                if !matches!(context_window, ContextWindow::Medium) {
+                    footer_parts.push(
+                        match context_window {
+                            ContextWindow::Small => "ctx:S",
+                            ContextWindow::Medium => "ctx:M",
+                            ContextWindow::Large => "ctx:L",
+                            ContextWindow::XLarge => "ctx:XL",
+                        }
+                        .to_string(),
+                    );
+                }
+                footer_parts.push(footer_legend(show_help).to_string());
                 if peek_badge_until
                     .map(|t| t > Instant::now())
                     .unwrap_or(false)
                 {
-                    footer_line.push_str(" | PEEK");
+                    footer_parts.push("PEEK".to_string());
                 }
+                let footer_line = footer_parts.join(" | ");
                 let footer = Paragraph::new(footer_line);
-                f.render_widget(footer, chunks[3]);
+                f.render_widget(footer, chunks[2]);
 
                 if show_help {
                     render_help_overlay(f, palette, help_scroll);
@@ -1025,9 +1688,107 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                 .unwrap_or_else(|| Duration::from_millis(0))
         };
 
-        if crossterm::event::poll(timeout)?
-            && let Event::Key(key) = event::read()?
-        {
+        if crossterm::event::poll(timeout)? {
+            let event = event::read()?;
+
+            // Handle mouse events
+            if let Event::Mouse(mouse) = event {
+                needs_draw = true;
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let col = mouse.column;
+                        let row = mouse.row;
+
+                        // Check if click is in detail area
+                        if let Some(detail_rect) = last_detail_area
+                            && col >= detail_rect.x
+                            && col < detail_rect.x + detail_rect.width
+                            && row >= detail_rect.y
+                            && row < detail_rect.y + detail_rect.height
+                        {
+                            focus_region = FocusRegion::Detail;
+                            focus_flash_until = Some(Instant::now() + Duration::from_millis(220));
+                            status = "Focus: Detail (click)".to_string();
+                            continue;
+                        }
+
+                        // Check if click is in a pane
+                        for (vis_idx, pane_rect) in last_pane_rects.iter().enumerate() {
+                            if col >= pane_rect.x
+                                && col < pane_rect.x + pane_rect.width
+                                && row >= pane_rect.y
+                                && row < pane_rect.y + pane_rect.height
+                            {
+                                // Calculate which pane in the full list
+                                let pane_idx = pane_scroll_offset + vis_idx;
+                                if pane_idx < panes.len() {
+                                    // Switch to this pane
+                                    if active_pane != pane_idx {
+                                        active_pane = pane_idx;
+                                        focus_flash_until =
+                                            Some(Instant::now() + Duration::from_millis(220));
+                                    }
+                                    focus_region = FocusRegion::Results;
+
+                                    // Calculate which item was clicked (2 lines per item + 1 for border)
+                                    let relative_row = row.saturating_sub(pane_rect.y + 1);
+                                    let item_idx = (relative_row / 2) as usize;
+                                    if let Some(pane) = panes.get_mut(pane_idx)
+                                        && item_idx < pane.hits.len()
+                                    {
+                                        pane.selected = item_idx;
+                                        cached_detail = None;
+                                        detail_scroll = 0;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        // Scroll up in detail or results depending on focus
+                        match focus_region {
+                            FocusRegion::Detail => {
+                                detail_scroll = detail_scroll.saturating_sub(3);
+                            }
+                            FocusRegion::Results => {
+                                if let Some(pane) = panes.get_mut(active_pane)
+                                    && pane.selected > 0
+                                {
+                                    pane.selected = pane.selected.saturating_sub(1);
+                                    cached_detail = None;
+                                    detail_scroll = 0;
+                                }
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        // Scroll down in detail or results depending on focus
+                        match focus_region {
+                            FocusRegion::Detail => {
+                                detail_scroll = detail_scroll.saturating_add(3);
+                            }
+                            FocusRegion::Results => {
+                                if let Some(pane) = panes.get_mut(active_pane)
+                                    && pane.selected + 1 < pane.hits.len()
+                                {
+                                    pane.selected += 1;
+                                    cached_detail = None;
+                                    detail_scroll = 0;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            // Handle key events
+            let Event::Key(key) = event else {
+                continue;
+            };
+
             needs_draw = true;
 
             // Global quit override
@@ -1063,8 +1824,17 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
             match input_mode {
                 InputMode::Query => {
                     if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        if let KeyCode::Char('r') = key.code {
-                            if query_history.is_empty() {
+                        // Handle both 'r' and 'R' since Shift modifier may change the char
+                        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+                            // Ctrl+Shift+R = refresh search (re-query index)
+                            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                status = "Refreshing search...".to_string();
+                                page = 0;
+                                dirty_since = Some(Instant::now());
+                                cached_detail = None;
+                                detail_scroll = 0;
+                            } else if query_history.is_empty() {
+                                // Ctrl+R = cycle history
                                 status = "No query history yet".to_string();
                             } else {
                                 let next = history_cursor
@@ -1146,6 +1916,10 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         KeyCode::Left => match focus_region {
                             FocusRegion::Results => {
                                 active_pane = active_pane.saturating_sub(1);
+                                // Scroll pane view if active moves before visible range
+                                if active_pane < pane_scroll_offset {
+                                    pane_scroll_offset = active_pane;
+                                }
                                 focus_flash_until =
                                     Some(Instant::now() + Duration::from_millis(220));
                                 cached_detail = None;
@@ -1161,6 +1935,11 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 FocusRegion::Results => {
                                     if active_pane + 1 < panes.len() {
                                         active_pane += 1;
+                                        // Scroll pane view if active moves past visible range
+                                        if active_pane >= pane_scroll_offset + MAX_VISIBLE_PANES {
+                                            pane_scroll_offset =
+                                                active_pane.saturating_sub(MAX_VISIBLE_PANES - 1);
+                                        }
                                         focus_flash_until =
                                             Some(Instant::now() + Duration::from_millis(220));
                                         cached_detail = None;
@@ -1277,7 +2056,10 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         KeyCode::F(3) => {
                             input_mode = InputMode::Agent;
                             input_buffer.clear();
-                            status = "Agent filter: type slug, Enter=apply, Esc=cancel".to_string();
+                            status = format!(
+                                "Agents: {} (type to filter, Tab=complete, Enter=apply)",
+                                KNOWN_AGENTS.join(", ")
+                            );
                         }
                         KeyCode::F(4) if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             filters.agents.clear();
@@ -1297,25 +2079,29 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         }
                         KeyCode::F(5) if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             let now = chrono::Utc::now().timestamp_millis();
-                            let presets = [
-                                Some(now - 86_400_000),    // 24h
-                                Some(now - 604_800_000),   // 7d
-                                Some(now - 2_592_000_000), // 30d
-                                None,
+                            // Presets with their labels: (timestamp, label)
+                            let presets: [(Option<i64>, &str); 4] = [
+                                (Some(now - 86_400_000), "last 24h"),
+                                (Some(now - 604_800_000), "last 7 days"),
+                                (Some(now - 2_592_000_000), "last 30 days"),
+                                (None, "all time"),
                             ];
                             let current = filters.created_from;
+                            // Find which preset roughly matches current (within 1 minute tolerance)
                             let idx = presets
                                 .iter()
-                                .position(|p| *p == current)
-                                .unwrap_or(usize::MAX);
-                            let next = presets.get((idx + 1) % presets.len()).copied().flatten();
-                            filters.created_from = next;
+                                .position(|(p, _)| match (p, current) {
+                                    (Some(a), Some(b)) => (a - b).abs() < 60_000,
+                                    (None, None) => true,
+                                    _ => false,
+                                })
+                                .unwrap_or(presets.len() - 1);
+                            let next_idx = (idx + 1) % presets.len();
+                            let (next_ts, next_label) = presets[next_idx];
+                            filters.created_from = next_ts;
                             filters.created_to = None;
                             page = 0;
-                            status = match next {
-                                Some(_) => "Time preset: since recent".to_string(),
-                                None => "Time preset: all".to_string(),
-                            };
+                            status = format!("Time filter: {}", next_label);
                             dirty_since = Some(Instant::now());
                             focus_region = FocusRegion::Results;
                             cached_detail = None;
@@ -1324,14 +2110,15 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         KeyCode::F(5) => {
                             input_mode = InputMode::CreatedFrom;
                             input_buffer.clear();
-                            status = "Created-from (ms since epoch): Enter=apply, Esc=cancel"
+                            status = "From: -7d, yesterday, 2024-11-25 | Enter=apply, Esc=cancel"
                                 .to_string();
                         }
                         KeyCode::F(6) => {
                             input_mode = InputMode::CreatedTo;
                             input_buffer.clear();
                             status =
-                                "Created-to (ms since epoch): Enter=apply, Esc=cancel".to_string();
+                                "To: -7d, yesterday, 2024-11-25, now | Enter=apply, Esc=cancel"
+                                    .to_string();
                         }
                         KeyCode::F(7) => {
                             context_window = context_window.next();
@@ -1376,11 +2163,15 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         KeyCode::F(8) => {
                             if let Some(hit) = active_hit(&panes, active_pane) {
                                 let path = &hit.source_path;
-                                let line_hint = hit
-                                    .snippet
-                                    .find("line ")
-                                    .and_then(|i| hit.snippet[i + 5..].split_whitespace().next())
-                                    .and_then(|s| s.parse::<usize>().ok());
+                                // Prefer line_number field, fallback to parsing snippet
+                                let line_hint = hit.line_number.or_else(|| {
+                                    hit.snippet
+                                        .find("line ")
+                                        .and_then(|i| {
+                                            hit.snippet[i + 5..].split_whitespace().next()
+                                        })
+                                        .and_then(|s| s.parse::<usize>().ok())
+                                });
                                 let mut cmd = StdCommand::new(&editor_cmd);
                                 if let Some(line) = line_hint {
                                     cmd.arg(format!("{}{}", editor_line_flag, line));
@@ -1487,7 +2278,8 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 dirty_since = Some(Instant::now());
                                 continue;
                             }
-                            if c == 'g' {
+                            // Vim-style: g/G jump to first/last only when panes are showing
+                            if c == 'g' && !panes.is_empty() {
                                 if let Some(pane) = panes.get_mut(active_pane) {
                                     pane.selected = 0;
                                     cached_detail = None;
@@ -1495,13 +2287,93 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 }
                                 continue;
                             }
-                            if c == 'G' {
+                            if c == 'G' && !panes.is_empty() {
                                 if let Some(pane) = panes.get_mut(active_pane)
                                     && !pane.hits.is_empty()
                                 {
                                     pane.selected = pane.hits.len() - 1;
                                     cached_detail = None;
                                     detail_scroll = 0;
+                                }
+                                continue;
+                            }
+                            // Vim-style navigation: j/k/h/l only when panes are showing
+                            if c == 'j' && !panes.is_empty() {
+                                match focus_region {
+                                    FocusRegion::Results => {
+                                        if let Some(pane) = panes.get_mut(active_pane)
+                                            && pane.selected + 1 < pane.hits.len()
+                                        {
+                                            pane.selected += 1;
+                                            cached_detail = None;
+                                            detail_scroll = 0;
+                                        }
+                                    }
+                                    FocusRegion::Detail => {
+                                        detail_scroll = detail_scroll.saturating_add(1);
+                                    }
+                                }
+                                continue;
+                            }
+                            if c == 'k' && !panes.is_empty() {
+                                match focus_region {
+                                    FocusRegion::Results => {
+                                        if let Some(pane) = panes.get_mut(active_pane)
+                                            && pane.selected > 0
+                                        {
+                                            pane.selected -= 1;
+                                            cached_detail = None;
+                                            detail_scroll = 0;
+                                        }
+                                    }
+                                    FocusRegion::Detail => {
+                                        detail_scroll = detail_scroll.saturating_sub(1);
+                                    }
+                                }
+                                continue;
+                            }
+                            if c == 'h' && !panes.is_empty() {
+                                match focus_region {
+                                    FocusRegion::Results => {
+                                        active_pane = active_pane.saturating_sub(1);
+                                        if active_pane < pane_scroll_offset {
+                                            pane_scroll_offset = active_pane;
+                                        }
+                                        focus_flash_until =
+                                            Some(Instant::now() + Duration::from_millis(220));
+                                        cached_detail = None;
+                                        detail_scroll = 0;
+                                    }
+                                    FocusRegion::Detail => {
+                                        focus_region = FocusRegion::Results;
+                                        status = "Focus: Results".to_string();
+                                    }
+                                }
+                                continue;
+                            }
+                            if c == 'l' && !panes.is_empty() {
+                                match focus_region {
+                                    FocusRegion::Results => {
+                                        if active_pane + 1 < panes.len() {
+                                            active_pane += 1;
+                                            if active_pane >= pane_scroll_offset + MAX_VISIBLE_PANES
+                                            {
+                                                pane_scroll_offset = active_pane
+                                                    .saturating_sub(MAX_VISIBLE_PANES - 1);
+                                            }
+                                            focus_flash_until =
+                                                Some(Instant::now() + Duration::from_millis(220));
+                                            cached_detail = None;
+                                            detail_scroll = 0;
+                                        } else {
+                                            focus_region = FocusRegion::Detail;
+                                            status =
+                                                "Focus: Detail (j/k scroll, h back)".to_string();
+                                        }
+                                    }
+                                    FocusRegion::Detail => {
+                                        // Already at rightmost
+                                    }
                                 }
                                 continue;
                             }
@@ -1585,11 +2457,15 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 }
                             } else if let Some(hit) = active_hit(&panes, active_pane) {
                                 let path = &hit.source_path;
-                                let line_hint = hit
-                                    .snippet
-                                    .find("line ")
-                                    .and_then(|i| hit.snippet[i + 5..].split_whitespace().next())
-                                    .and_then(|s| s.parse::<usize>().ok());
+                                // Prefer line_number field, fallback to parsing snippet
+                                let line_hint = hit.line_number.or_else(|| {
+                                    hit.snippet
+                                        .find("line ")
+                                        .and_then(|i| {
+                                            hit.snippet[i + 5..].split_whitespace().next()
+                                        })
+                                        .and_then(|s| s.parse::<usize>().ok())
+                                });
                                 let mut cmd = StdCommand::new(&editor_cmd);
                                 if let Some(line) = line_hint {
                                     cmd.arg(format!("{}{}", editor_line_flag, line));
@@ -1605,6 +2481,14 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         input_mode = InputMode::Query;
                         input_buffer.clear();
                         status = "Agent filter cancelled".to_string();
+                    }
+                    KeyCode::Tab => {
+                        // Tab completes to first matching suggestion
+                        let suggestions = agent_suggestions(&input_buffer);
+                        if let Some(first) = suggestions.first() {
+                            input_buffer = first.to_string();
+                            status = format!("Completed to '{}'. Press Enter to apply.", first);
+                        }
                     }
                     KeyCode::Enter => {
                         filters.agents.clear();
@@ -1631,8 +2515,39 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     }
                     KeyCode::Backspace => {
                         input_buffer.pop();
+                        // Update suggestions in status
+                        let suggestions = agent_suggestions(&input_buffer);
+                        if !suggestions.is_empty() && !input_buffer.is_empty() {
+                            status = format!(
+                                "Suggestions: {} (Tab to complete)",
+                                suggestions.join(", ")
+                            );
+                        } else if input_buffer.is_empty() {
+                            status = format!(
+                                "Agents: {} (type to filter, Tab to complete)",
+                                KNOWN_AGENTS.join(", ")
+                            );
+                        }
                     }
-                    KeyCode::Char(c) => input_buffer.push(c),
+                    KeyCode::Char(c) => {
+                        input_buffer.push(c);
+                        // Update suggestions in status
+                        let suggestions = agent_suggestions(&input_buffer);
+                        if suggestions.is_empty() {
+                            status =
+                                format!("No matching agents. Known: {}", KNOWN_AGENTS.join(", "));
+                        } else if suggestions.len() == 1 {
+                            status = format!(
+                                "Match: {} (Tab to complete, Enter to apply)",
+                                suggestions[0]
+                            );
+                        } else {
+                            status = format!(
+                                "Suggestions: {} (Tab to complete)",
+                                suggestions.join(", ")
+                            );
+                        }
+                    }
                     _ => {}
                 },
                 InputMode::Workspace => match key.code {
@@ -1677,19 +2592,28 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         status = "From timestamp cancelled".to_string();
                     }
                     KeyCode::Enter => {
-                        filters.created_from = input_buffer.trim().parse::<i64>().ok();
-                        page = 0;
-                        input_mode = InputMode::Query;
-                        active_pane = 0;
-                        cached_detail = None;
-                        detail_scroll = 0;
-                        status = format!(
-                            "created_from={:?}, created_to={:?}",
-                            filters.created_from, filters.created_to
-                        );
-                        input_buffer.clear();
-                        dirty_since = Some(Instant::now());
-                        focus_region = FocusRegion::Results;
+                        let parsed = parse_time_input(&input_buffer);
+                        if parsed.is_some() || input_buffer.trim().is_empty() {
+                            filters.created_from = parsed;
+                            page = 0;
+                            input_mode = InputMode::Query;
+                            active_pane = 0;
+                            cached_detail = None;
+                            detail_scroll = 0;
+                            status = if let Some(ts) = parsed {
+                                format!("From filter set: {}", format_time_short(ts))
+                            } else {
+                                "From filter cleared".to_string()
+                            };
+                            input_buffer.clear();
+                            dirty_since = Some(Instant::now());
+                            focus_region = FocusRegion::Results;
+                        } else {
+                            status = format!(
+                                "Invalid time format '{}'. Try: -7d, yesterday, 2024-11-25",
+                                input_buffer.trim()
+                            );
+                        }
                     }
                     KeyCode::Backspace => {
                         input_buffer.pop();
@@ -1704,19 +2628,28 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         status = "To timestamp cancelled".to_string();
                     }
                     KeyCode::Enter => {
-                        filters.created_to = input_buffer.trim().parse::<i64>().ok();
-                        page = 0;
-                        input_mode = InputMode::Query;
-                        active_pane = 0;
-                        cached_detail = None;
-                        detail_scroll = 0;
-                        status = format!(
-                            "created_from={:?}, created_to={:?}",
-                            filters.created_from, filters.created_to
-                        );
-                        input_buffer.clear();
-                        dirty_since = Some(Instant::now());
-                        focus_region = FocusRegion::Results;
+                        let parsed = parse_time_input(&input_buffer);
+                        if parsed.is_some() || input_buffer.trim().is_empty() {
+                            filters.created_to = parsed;
+                            page = 0;
+                            input_mode = InputMode::Query;
+                            active_pane = 0;
+                            cached_detail = None;
+                            detail_scroll = 0;
+                            status = if let Some(ts) = parsed {
+                                format!("To filter set: {}", format_time_short(ts))
+                            } else {
+                                "To filter cleared".to_string()
+                            };
+                            input_buffer.clear();
+                            dirty_since = Some(Instant::now());
+                            focus_region = FocusRegion::Results;
+                        } else {
+                            status = format!(
+                                "Invalid time format '{}'. Try: -7d, yesterday, 2024-11-25",
+                                input_buffer.trim()
+                            );
+                        }
                     }
                     KeyCode::Backspace => {
                         input_buffer.pop();
@@ -1797,19 +2730,26 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                                 if panes.is_empty() {
                                     active_pane = 0;
                                 }
-                                status = format!(
-                                    "Page {} | agents:{} | mode:{} | filters a={:?} w={:?} t=({:?},{:?})",
-                                    page + 1,
-                                    panes.len(),
-                                    match match_mode {
-                                        MatchMode::Standard => "standard",
-                                        MatchMode::Prefix => "prefix",
-                                    },
-                                    filters.agents,
-                                    filters.workspaces,
-                                    filters.created_from,
-                                    filters.created_to
-                                );
+                                // Ensure scroll offset puts active_pane in visible range
+                                if active_pane < pane_scroll_offset {
+                                    pane_scroll_offset = active_pane;
+                                } else if active_pane >= pane_scroll_offset + MAX_VISIBLE_PANES {
+                                    pane_scroll_offset =
+                                        active_pane.saturating_sub(MAX_VISIBLE_PANES - 1);
+                                }
+                                // Reset scroll if it's beyond available panes
+                                if pane_scroll_offset > panes.len().saturating_sub(1) {
+                                    pane_scroll_offset = 0;
+                                }
+                                // Show a clean, user-friendly status
+                                let total_hits: usize = panes.iter().map(|p| p.total_count).sum();
+                                status = if total_hits == 0 {
+                                    "No results found".to_string()
+                                } else if panes.len() == 1 {
+                                    format!("{} results", total_hits)
+                                } else {
+                                    format!("{} results across {} agents", total_hits, panes.len())
+                                };
                                 if !query.trim().is_empty()
                                     && query_history.front().map(|q| q != &query).unwrap_or(true)
                                 {
@@ -1834,6 +2774,11 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     }
                 }
             }
+            // Advance spinner and redraw if search is pending
+            if dirty_since.is_some() {
+                spinner_frame = spinner_frame.wrapping_add(1);
+                needs_draw = true;
+            }
             last_tick = Instant::now();
         }
     }
@@ -1848,6 +2793,10 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
             MatchMode::Prefix => "prefix".into(),
         }),
         context_window: Some(context_window.label().into()),
+        // Mark that user has seen (or had opportunity to see) the help overlay
+        has_seen_help: Some(true),
+        // Persist query history for next session
+        query_history: Some(query_history.iter().cloned().collect()),
     };
     save_state(&state_path, &persisted_out);
 
@@ -1871,7 +2820,7 @@ fn run_tui_headless(data_dir_override: Option<std::path::PathBuf>) -> Result<()>
 fn teardown_terminal() -> Result<()> {
     let mut stdout = io::stdout();
     disable_raw_mode()?;
-    execute!(stdout, LeaveAlternateScreen)?;
+    execute!(stdout, LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 
@@ -1888,12 +2837,54 @@ mod tests {
         let state = TuiStatePersisted {
             match_mode: Some("prefix".into()),
             context_window: Some("XL".into()),
+            has_seen_help: Some(true),
+            query_history: Some(vec!["test query".into(), "another search".into()]),
         };
         save_state(&path, &state);
 
         let loaded = load_state(&path);
         assert_eq!(loaded.match_mode.as_deref(), Some("prefix"));
         assert_eq!(loaded.context_window.as_deref(), Some("XL"));
+        assert_eq!(loaded.has_seen_help, Some(true));
+        assert_eq!(loaded.query_history.as_ref().map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn parse_time_input_handles_various_formats() {
+        // Relative time formats
+        let now_ms = Utc::now().timestamp_millis();
+
+        // -7d should be ~7 days ago (within 1 minute tolerance for test duration)
+        let seven_days_ago = parse_time_input("-7d").unwrap();
+        let expected_7d = now_ms - 7 * 24 * 60 * 60 * 1000;
+        assert!((seven_days_ago - expected_7d).abs() < 60000);
+
+        // -24h should be ~24 hours ago
+        let day_ago = parse_time_input("-24h").unwrap();
+        let expected_24h = now_ms - 24 * 60 * 60 * 1000;
+        assert!((day_ago - expected_24h).abs() < 60000);
+
+        // Keyword shortcuts
+        assert!(parse_time_input("now").is_some());
+        assert!(parse_time_input("today").is_some());
+        assert!(parse_time_input("yesterday").is_some());
+
+        // ISO date format
+        let iso_date = parse_time_input("2024-11-25").unwrap();
+        assert!(iso_date > 0);
+
+        // Numeric timestamp (seconds)
+        let ts_seconds = parse_time_input("1732500000").unwrap();
+        assert_eq!(ts_seconds, 1732500000000); // Converted to ms
+
+        // Numeric timestamp (milliseconds)
+        let ts_ms = parse_time_input("1732500000000").unwrap();
+        assert_eq!(ts_ms, 1732500000000);
+
+        // Invalid input returns None
+        assert!(parse_time_input("invalid").is_none());
+        assert!(parse_time_input("").is_none());
+        assert!(parse_time_input("-xyz").is_none());
     }
 
     #[test]

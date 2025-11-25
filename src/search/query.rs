@@ -29,6 +29,8 @@ pub struct SearchHit {
     pub agent: String,
     pub workspace: String,
     pub created_at: Option<i64>,
+    /// Line number in the source file where the matched message starts (1-indexed)
+    pub line_number: Option<usize>,
 }
 
 pub struct SearchClient {
@@ -206,6 +208,7 @@ impl SearchClient {
                 agent,
                 workspace,
                 created_at,
+                line_number: None, // TODO: populate from index if stored
             });
         }
         Ok(hits)
@@ -280,6 +283,7 @@ impl SearchClient {
                     agent,
                     workspace,
                     created_at,
+                    line_number: None, // TODO: populate from sqlite if stored
                 })
             },
         )?;
