@@ -51,6 +51,43 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 
 ---
 
+## 🏎️ Performance Engineering: Caching & Warming
+To achieve sub-60ms latency on large datasets, `cass` implements a multi-tier caching strategy in `src/search/query.rs`:
+
+1.  **Sharded LRU Cache**: The `prefix_cache` is split into shards (default 256 entries each) to reduce mutex contention during concurrent reads/writes from the async searcher.
+2.  **Bloom Filter Pre-checks**: Each cached hit stores a 64-bit Bloom filter mask of its content tokens. When a user types more characters, we check the mask first. If the new token isn't in the mask, we reject the cache entry immediately without a string comparison.
+3.  **Predictive Warming**: A background `WarmJob` thread watches the input. When the user pauses typing, it triggers a lightweight "warm-up" query against the Tantivy reader to pre-load relevant index segments into the OS page cache.
+
+## 🔌 The Connector Interface (Polymorphism)
+The system is designed for extensibility via the `Connector` trait (`src/connectors/mod.rs`). This allows `cass` to treat disparate log formats as a uniform stream of events.
+
+```mermaid
+classDiagram
+    class Connector {
+        <<interface>>
+        +detect() DetectionResult
+        +scan(ScanContext) Vec<NormalizedConversation>
+    }
+    class NormalizedConversation {
+        +String agent_slug
+        +Vec<NormalizedMessage> messages
+    }
+    class CodexConnector
+    class ClaudeCodeConnector
+    class GeminiConnector
+    
+    Connector <|-- CodexConnector
+    Connector <|-- ClaudeCodeConnector
+    Connector <|-- GeminiConnector
+    
+    CodexConnector ..> NormalizedConversation : produces
+```
+
+- **Polymorphic Scanning**: The indexer iterates over a `Vec<Box<dyn Connector>>`, unaware of the underlying file formats (JSONL, SQLite, specialized JSON).
+- **Resilient Parsing**: Connectors handle legacy formats (e.g., integer vs ISO timestamps) and flatten complex tool-use blocks into searchable text.
+
+---
+
 ## 🧠 Architecture & Engineering
 
 `cass` employs a dual-storage strategy to balance data integrity with search performance.
@@ -106,6 +143,35 @@ flowchart LR
 - **Non-Blocking**: The indexer runs in a background thread. You can search while it works.
 - **Watch Mode**: Uses file system watchers (`notify`) to detect changes in agent logs. When you save a file or an agent replies, `cass` re-indexes just that conversation and refreshes the search view automatically.
 - **Progress Tracking**: Atomic counters track scanning/indexing phases, displayed unobtrusively in the TUI footer.
+
+## 🔍 Deep Dive: Internals
+
+### The TUI Engine (State Machine & Async Loop)
+The interactive interface (`src/ui/tui.rs`) is the largest component (~3.5k lines), implementing a sophisticated **Immediate Mode** architecture using `ratatui`.
+
+1.  **Application State**: A monolithic struct tracks the entire UI state (search query, cursor position, scroll offsets, active filters, and cached details).
+2.  **Event Loop**: A polling loop handles standard inputs (keyboard/mouse) and custom events (Search results ready, Progress updates).
+3.  **Debouncing**: User input triggers an async search task via a `tokio` channel. To prevent UI freezing, we debounce keystrokes (150ms) and run queries on a separate thread, updating the state only when results return.
+4.  **Optimistic Rendering**: The UI renders the *current* state immediately (60 FPS), drawing "stale" results or loading skeletons while waiting for the async searcher.
+
+```mermaid
+graph TD
+    Input([User Input]) -->|Key/Mouse| EventLoop
+    EventLoop -->|Update| State[App State]
+    State -->|Render| Terminal
+    
+    State -->|Query Change| Debounce{Debounce}
+    Debounce -->|Fire| SearchTask[Async Search]
+    SearchTask -->|Results| Channel
+    Channel -->|Poll| EventLoop
+```
+
+### Append-Only Storage Strategy
+Data integrity is paramount. `cass` treats the SQLite database (`src/storage/sqlite.rs`) as an **append-only log** for conversations:
+
+- **Immutable History**: When an agent adds a message to a conversation, we don't update the existing row. We insert the new message linked to the conversation ID.
+- **Deduplication**: The connector layer uses content hashing to prevent duplicate messages if an agent re-writes a file.
+- **Versioning**: A `schema_version` meta-table and strict migration path ensure that upgrades (like the recent move to v3) are safe and atomic.
 
 ---
 
@@ -176,22 +242,129 @@ cass stats --json
 ---
 
 ## 🔒 Integrity & Safety
+
 - **Verified Install**: The installer enforces SHA256 checksums.
+
 - **Sandboxed Data**: All indexes/DBs live in standard platform data directories (`~/.local/share/coding-agent-search` on Linux).
+
 - **Read-Only Source**: `cass` *never* modifies your agent log files. It only reads them.
 
+
+
+## 📦 Installer Strategy
+
+The project ships with a robust installer (`install.sh` / `install.ps1`) designed for CI/CD and local use:
+
+- **Checksum Verification**: Validates artifacts against a `.sha256` file or explicit `--checksum` flag.
+
+- **Rustup Bootstrap**: Automatically installs the nightly toolchain if missing.
+
+- **Easy Mode**: `--easy-mode` automates installation to `~/.local/bin` without prompts.
+
+- **Platform Agnostic**: Detects OS/Arch (Linux/macOS/Windows, x86_64/arm64) and fetches the correct binary.
+
+
+
+## ⚙️ Environment
+
+- **Config**: Loads `.env` via `dotenvy::dotenv().ok()`; configure API/base paths there. Do not overwrite `.env`.
+
+- **Data Location**: Defaults to standard platform data directories (e.g., `~/.local/share/coding-agent-search`). Override with `CASS_DATA_DIR` or `--data-dir`.
+
+- **Logs**: Written to `cass.log` (daily rotating) in the data directory.
+
+- **Updates**: Interactive TUI checks for GitHub releases on startup. Skip with `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1` or `TUI_HEADLESS=1`.
+
+
+
+## 🩺 Troubleshooting
+
+- **Checksum mismatch**: Ensure `.sha256` is reachable or pass `--checksum` explicitly. Check proxies/firewalls.
+
+- **Binary not on PATH**: Append `~/.local/bin` (or your `--dest`) to `PATH`; re-open shell.
+
+- **Nightly missing in CI**: Set `RUSTUP_INIT_SKIP=1` if toolchain is preinstalled; otherwise allow installer to run rustup.
+
+- **Watch mode not triggering**: Confirm `watch_state.json` updates and that connector roots are accessible; `notify` relies on OS file events (inotify/FSEvents).
+
+
+
 ## 🧪 Developer Workflow
+
 We target **Rust Nightly** to leverage the latest optimizations.
 
+
+
 ```bash
+
+# Format & Lint
+
+cargo fmt --check
+
+cargo clippy --all-targets -- -D warnings
+
+
+
 # Build & Test
+
 cargo build --release
+
 cargo test
 
+
+
 # Run End-to-End Tests
+
 cargo test --test e2e_index_tui
+
 cargo test --test install_scripts
+
 ```
 
+
+
+## 🤝 Contributing
+
+- Follow the nightly toolchain policy and run `fmt`/`clippy`/`test` before sending changes.
+
+- Keep console output colorful and informative.
+
+- Avoid destructive commands; do not use regex-based mass scripts in this repo.
+
+
+
+## 🔍 Deep Dive: How Key Subsystems Work
+
+### Tantivy schema & preview field (v4)
+- Schema v4 (hash `tantivy-schema-v4-edge-ngram-preview`) stores agent/workspace/source_path/msg_idx/created_at/title/content plus edge-ngrams (`title_prefix`, `content_prefix`) for type-ahead matching.
+- New `preview` field keeps a short, stored excerpt (~200 chars + ellipsis) so prefix-only queries can render snippets without pulling full content.
+- Rebuilds auto-trigger when the schema hash changes; index directory is recreated as needed. Tokenizer: `hyphen_normalize` to keep “cma-es” searchable while enabling prefix splits.
+
+### Search pipeline (src/search/query.rs)
+- Cache-first: per-agent + global LRU shards (env `CASS_CACHE_SHARD_CAP`, default 256). Cached hits store lowered content/title/snippet and a 64-bit bloom mask; bloom + substring keeps validation fast.
+- Fallback order: Tantivy (primary) → SQLite FTS (consistency) with deduping/noise filtering. Prefix-only snippet path tries cached prefix snippet, then a cheap local snippet, else Tantivy `SnippetGenerator`.
+- Warm worker: runtime-aware, debounced (env `CASS_WARM_DEBOUNCE_MS`, default 120 ms), runs a tiny 1-doc search to keep the reader hot; reloads are debounced (300 ms) and counted in metrics (cache hit/miss/shortfall/reloads tracked internally).
+
+### Indexer (src/indexer/mod.rs)
+- Opens SQLite + Tantivy; `--full` clears tables/FTS and wipes Tantivy docs; `--force-rebuild` recreates index dir when schema changes.
+- Connector loop: detect → scan per connector, ingest normalized conversations into SQLite and Tantivy. Watch mode: debounced filesystem watcher, path classification per connector, since_ts tracked in `watch_state.json`, incremental reindex of touched sources. TUI startup spawns a background indexer with watch enabled.
+
+### Storage (src/storage/sqlite.rs)
+- Normalized relational model (agents, workspaces, conversations, messages, snippets, tags) with FTS mirror on messages. Single-transaction insert/upsert, append-only unless `--full`. `schema_version` guard; bundled modern SQLite.
+
+### UI (src/ui/tui.rs)
+- Three-pane layout (agents → results → detail), responsive splits, focus model (Tab/Shift+Tab), mouse support. Detail tabs (Messages/Snippets/Raw) plus full-screen modal with role colors, code blocks, JSON pretty-print, highlights. Footer packs shortcuts + mode badges; state persisted in `tui_state.json`.
+
+### Connectors (src/connectors/*.rs)
+- Each connector implements `detect` (root discovery) and `scan` (since_ts-aware ingestion). External IDs preserved for dedupe; workspace/source paths carried through; roles normalized.
+
+### Installers (install.sh / install.ps1)
+- Checksum-verified easy/normal modes, optional quickstart (index on first run), rustup bootstrap if needed. PATH hints appended with warnings; SHA256 required.
+
+### Benchmarks & Tests
+- Benches: `index_perf` measures full index build; `runtime_perf` covers search latency + indexing micro-cases.
+- Tests: unit + integration + headless TUI e2e; installer checksum fixtures; watch-mode and index/search integration; cache/bloom UTF-8 safety and bloom gate tests.
+
 ## 📜 License
+
 MIT or Apache-2.0. See [LICENSE](LICENSE) for details.
