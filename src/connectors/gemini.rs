@@ -248,7 +248,7 @@ impl Connector for GeminiConnector {
             let mut started_at = start_time;
             let mut ended_at = last_updated;
 
-            for (idx, item) in messages_arr.iter().enumerate() {
+            for (_idx, item) in messages_arr.iter().enumerate() {
                 // Role from "type" field - Gemini uses "user" and "model"
                 let msg_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("model");
                 let role = if msg_type == "model" {
@@ -283,7 +283,7 @@ impl Connector for GeminiConnector {
                 }
 
                 messages.push(NormalizedMessage {
-                    idx: idx as i64,
+                    idx: 0, // will be re-assigned after filtering
                     role: role.to_string(),
                     author: None,
                     created_at: created,
@@ -291,6 +291,11 @@ impl Connector for GeminiConnector {
                     extra: item.clone(),
                     snippets: Vec::new(),
                 });
+            }
+
+            // Re-assign sequential indices after filtering
+            for (i, msg) in messages.iter_mut().enumerate() {
+                msg.idx = i as i64;
             }
 
             if messages.is_empty() {

@@ -84,7 +84,7 @@ impl Connector for ClaudeCodeConnector {
             let mut git_branch: Option<String> = None;
 
             if ext == Some("jsonl") {
-                for (idx, line) in content.lines().enumerate() {
+                for (_idx, line) in content.lines().enumerate() {
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -157,7 +157,7 @@ impl Connector for ClaudeCodeConnector {
                         .map(String::from);
 
                     messages.push(NormalizedMessage {
-                        idx: idx as i64,
+                        idx: 0, // will be re-assigned after filtering
                         role: role.to_string(),
                         author,
                         created_at: created,
@@ -166,11 +166,15 @@ impl Connector for ClaudeCodeConnector {
                         snippets: Vec::new(),
                     });
                 }
+                // Re-assign sequential indices after filtering
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    msg.idx = i as i64;
+                }
             } else {
                 // JSON or Claude format files
                 let val: Value = serde_json::from_str(&content).unwrap_or(Value::Null);
                 if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
-                    for (idx, item) in arr.iter().enumerate() {
+                    for (_idx, item) in arr.iter().enumerate() {
                         let role = item
                             .get("role")
                             .or_else(|| item.get("type"))
@@ -205,7 +209,7 @@ impl Connector for ClaudeCodeConnector {
                         }
 
                         messages.push(NormalizedMessage {
-                            idx: idx as i64,
+                            idx: 0, // will be re-assigned after filtering
                             role: role.to_string(),
                             author: None,
                             created_at: created,
@@ -214,6 +218,10 @@ impl Connector for ClaudeCodeConnector {
                             snippets: Vec::new(),
                         });
                     }
+                }
+                // Re-assign sequential indices after filtering
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    msg.idx = i as i64;
                 }
             }
             if messages.is_empty() {

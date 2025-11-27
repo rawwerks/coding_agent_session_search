@@ -95,7 +95,7 @@ impl Connector for CodexConnector {
 
             if ext == Some("jsonl") {
                 // Modern envelope format: each line has {type, timestamp, payload}
-                for (idx, line) in content.lines().enumerate() {
+                for (_idx, line) in content.lines().enumerate() {
                     if line.trim().is_empty() {
                         continue;
                     }
@@ -147,7 +147,7 @@ impl Connector for CodexConnector {
                                 ended_at = created.or(ended_at);
 
                                 messages.push(NormalizedMessage {
-                                    idx: idx as i64,
+                                    idx: 0, // will be re-assigned after filtering
                                     role: role.to_string(),
                                     author: None,
                                     created_at: created,
@@ -171,7 +171,7 @@ impl Connector for CodexConnector {
                                         if !text.is_empty() {
                                             ended_at = created.or(ended_at);
                                             messages.push(NormalizedMessage {
-                                                idx: idx as i64,
+                                                idx: 0, // will be re-assigned after filtering
                                                 role: "user".to_string(),
                                                 author: None,
                                                 created_at: created,
@@ -190,7 +190,7 @@ impl Connector for CodexConnector {
                                         if !text.is_empty() {
                                             ended_at = created.or(ended_at);
                                             messages.push(NormalizedMessage {
-                                                idx: idx as i64,
+                                                idx: 0, // will be re-assigned after filtering
                                                 role: "assistant".to_string(),
                                                 author: Some("reasoning".to_string()),
                                                 created_at: created,
@@ -206,6 +206,10 @@ impl Connector for CodexConnector {
                         }
                         _ => {} // Skip turn_context and unknown types
                     }
+                }
+                // Re-assign sequential indices after filtering
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    msg.idx = i as i64;
                 }
             } else if ext == Some("json") {
                 // Legacy format: single JSON object with {session, items}
@@ -223,7 +227,7 @@ impl Connector for CodexConnector {
 
                 // Parse items array
                 if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
-                    for (idx, item) in items.iter().enumerate() {
+                    for (_idx, item) in items.iter().enumerate() {
                         let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
 
                         let content_str = item
@@ -249,7 +253,7 @@ impl Connector for CodexConnector {
                         ended_at = created.or(ended_at);
 
                         messages.push(NormalizedMessage {
-                            idx: idx as i64,
+                            idx: 0, // will be re-assigned after filtering
                             role: role.to_string(),
                             author: None,
                             created_at: created,
@@ -258,6 +262,10 @@ impl Connector for CodexConnector {
                             snippets: Vec::new(),
                         });
                     }
+                }
+                // Re-assign sequential indices after filtering
+                for (i, msg) in messages.iter_mut().enumerate() {
+                    msg.idx = i as i64;
                 }
             }
 
