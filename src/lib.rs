@@ -378,11 +378,23 @@ async fn execute_cli(
             if let Commands::Tui { once: false, .. } = &command {
                 let bg_data_dir = log_dir.clone();
                 let bg_db = cli.db.clone();
-                spawn_background_indexer(bg_data_dir, bg_db);
-            }
+                // Create shared progress tracker
+                let progress = std::sync::Arc::new(indexer::IndexingProgress::default());
+                spawn_background_indexer(bg_data_dir, bg_db, Some(progress.clone()));
 
-            if let Commands::Tui { once, data_dir } = command {
-                ui::tui::run_tui(data_dir, once).map_err(|e| CliError {
+                if let Commands::Tui { once, data_dir } = command {
+                    ui::tui::run_tui(data_dir.clone(), once, Some(progress)).map_err(|e| {
+                        CliError {
+                            code: 9,
+                            kind: "tui",
+                            message: format!("tui failed: {e}"),
+                            hint: None,
+                            retryable: false,
+                        }
+                    })?;
+                }
+            } else if let Commands::Tui { once, data_dir } = command {
+                ui::tui::run_tui(data_dir.clone(), once, None).map_err(|e| CliError {
                     code: 9,
                     kind: "tui",
                     message: format!("tui failed: {e}"),
@@ -1169,7 +1181,11 @@ fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> 
     Ok(())
 }
 
-fn spawn_background_indexer(data_dir: PathBuf, db: Option<PathBuf>) {
+fn spawn_background_indexer(
+    data_dir: PathBuf,
+    db: Option<PathBuf>,
+    progress: Option<std::sync::Arc<indexer::IndexingProgress>>,
+) {
     std::thread::spawn(move || {
         let db_path = db.unwrap_or_else(|| data_dir.join("agent_search.db"));
         let opts = IndexOptions {
@@ -1178,6 +1194,7 @@ fn spawn_background_indexer(data_dir: PathBuf, db: Option<PathBuf>) {
             watch: true,
             db_path,
             data_dir,
+            progress,
         };
         if let Err(e) = indexer::run_index(opts) {
             warn!("Background indexer failed: {}", e);
@@ -1201,6 +1218,7 @@ fn run_index_with_data(
         watch,
         db_path,
         data_dir,
+        progress: None,
     };
     let spinner = match progress {
         ProgressResolved::Bars => Some(indicatif::ProgressBar::new_spinner()),

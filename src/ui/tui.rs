@@ -819,13 +819,33 @@ fn parse_message_content(content: &str, query: &str, palette: ThemePalette) -> V
             }
         }
 
-        // Regular text with search term highlighting
-        let rendered = highlight_terms_owned_with_style(
-            format!("  {}", line_text),
-            query,
-            palette,
-            Style::default(),
-        );
+        // Markdown-aware inline rendering with search highlight
+        let mut base = Style::default();
+        let mut content_body = line_text.to_string();
+        let mut prefix = "  ".to_string();
+
+        if trimmed.starts_with('#') {
+            let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+            let after = trimmed[hashes..].trim_start();
+            content_body = after.to_string();
+            base = base
+                .fg(palette.accent_alt)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            prefix = format!("{} ", "#".repeat(hashes));
+        } else if trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+        {
+            content_body = trimmed[2..].trim_start().to_string();
+            prefix = " • ".to_string();
+        } else if trimmed.starts_with('>') {
+            content_body = trimmed.trim_start_matches('>').trim_start().to_string();
+            prefix = " ❯ ".to_string();
+            base = base.add_modifier(Modifier::ITALIC).fg(palette.hint);
+        }
+
+        let rendered =
+            render_inline_markdown_line(&format!("{prefix}{content_body}"), query, palette, base);
         lines.push(rendered);
     }
 
@@ -1127,29 +1147,54 @@ fn apply_match_mode(query: &str, mode: MatchMode) -> String {
     }
 }
 
-fn highlight_terms_owned_with_style(
-    text: String,
+fn highlight_spans_owned(
+    text: &str,
     query: &str,
     palette: ThemePalette,
     base: Style,
-) -> Line<'static> {
-    let owned = text;
+) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     if query.trim().is_empty() {
-        spans.push(Span::styled(owned, base));
-        return Line::from(spans);
+        spans.push(Span::styled(text.to_string(), base));
+        return spans;
     }
-    let lower = owned.to_lowercase();
+
+    let lower = text.to_lowercase();
     let q = query.to_lowercase();
+
+    // If Unicode casefolding changes byte lengths (e.g., ß -> ss), fall back to
+    // case-sensitive matching to avoid slicing errors.
+    if lower.len() != text.len() || q.len() != query.len() {
+        let mut remaining = text;
+        while let Some(pos) = remaining.find(query) {
+            if pos > 0 {
+                spans.push(Span::styled(remaining[..pos].to_string(), base));
+            }
+            let end = pos + query.len();
+            spans.push(Span::styled(
+                remaining[pos..end].to_string(),
+                base.patch(
+                    Style::default()
+                        .fg(palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ));
+            remaining = &remaining[end..];
+        }
+        if !remaining.is_empty() {
+            spans.push(Span::styled(remaining.to_string(), base));
+        }
+        return spans;
+    }
     let mut idx = 0;
     while let Some(pos) = lower[idx..].find(&q) {
         let start = idx + pos;
         if start > idx {
-            spans.push(Span::styled(owned[idx..start].to_string(), base));
+            spans.push(Span::styled(text[idx..start].to_string(), base));
         }
         let end = start + q.len();
         spans.push(Span::styled(
-            owned[start..end].to_string(),
+            text[start..end].to_string(),
             base.patch(
                 Style::default()
                     .fg(palette.accent)
@@ -1158,9 +1203,97 @@ fn highlight_terms_owned_with_style(
         ));
         idx = end;
     }
-    if idx < owned.len() {
-        spans.push(Span::styled(owned[idx..].to_string(), base));
+    if idx < text.len() {
+        spans.push(Span::styled(text[idx..].to_string(), base));
     }
+    spans
+}
+
+fn highlight_terms_owned_with_style(
+    text: String,
+    query: &str,
+    palette: ThemePalette,
+    base: Style,
+) -> Line<'static> {
+    Line::from(highlight_spans_owned(&text, query, palette, base))
+}
+
+/// Render a single line with light-weight inline markdown (bold/italic/`code`) and
+/// search-term highlighting. Keeps everything ASCII-friendly for predictable widths.
+fn render_inline_markdown_line(
+    line: &str,
+    query: &str,
+    palette: ThemePalette,
+    base: Style,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut rest = line;
+
+    while !rest.is_empty() {
+        if let Some(content) = rest.strip_prefix("**") {
+            if let Some(end) = content.find("**") {
+                let (bold_text, tail) = content.split_at(end);
+                let highlighted = highlight_spans_owned(
+                    bold_text,
+                    query,
+                    palette,
+                    base.add_modifier(Modifier::BOLD),
+                );
+                spans.extend(highlighted);
+                rest = tail.trim_start_matches('*');
+                continue;
+            }
+        }
+
+        if let Some(content) = rest.strip_prefix('`') {
+            if let Some(end) = content.find('`') {
+                let (code_text, tail) = content.split_at(end);
+                let highlighted = highlight_spans_owned(
+                    code_text,
+                    query,
+                    palette,
+                    base.bg(palette.surface).fg(palette.accent_alt),
+                );
+                spans.extend(highlighted);
+                rest = &tail[1..]; // skip closing backtick
+                continue;
+            }
+        }
+
+        if let Some(content) = rest.strip_prefix('*') {
+            if !content.starts_with('*') {
+                if let Some(end) = content.find('*') {
+                    let (ital_text, tail) = content.split_at(end);
+                    let highlighted = highlight_spans_owned(
+                        ital_text,
+                        query,
+                        palette,
+                        base.add_modifier(Modifier::ITALIC),
+                    );
+                    spans.extend(highlighted);
+                    rest = tail.trim_start_matches('*');
+                    continue;
+                }
+            }
+        }
+
+        // Plain chunk until next special token
+        let next_special = rest.find(|c| c == '*' || c == '`').unwrap_or(rest.len());
+
+        if next_special == 0 {
+            // Avoid infinite loop on stray marker; emit literally and advance
+            if let Some((ch, tail)) = rest.chars().next().map(|c| (c, &rest[c.len_utf8()..])) {
+                spans.extend(highlight_spans_owned(&ch.to_string(), query, palette, base));
+                rest = tail;
+                continue;
+            }
+        }
+
+        let (plain, tail) = rest.split_at(next_special);
+        spans.extend(highlight_spans_owned(plain, query, palette, base));
+        rest = tail;
+    }
+
     Line::from(spans)
 }
 
@@ -1295,6 +1428,54 @@ enum FocusRegion {
     Detail,
 }
 
+fn char_width(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// Build a dense shortcut legend that fits within `max_width` characters.
+fn footer_shortcuts(max_width: usize) -> String {
+    const SHORTCUTS: &[&str] = &[
+        "j/k move",
+        "Tab focus",
+        "Enter open",
+        "/ query",
+        "[ ] tabs",
+        "Space peek",
+        "y copy",
+        "F3 agent",
+        "F4 ws",
+        "F5/F6 time",
+        "F7 ctx",
+        "F9 match",
+        "F12 rank",
+        "Ctrl+R hist",
+        "Ctrl+Shift+R refresh",
+        "F2 theme",
+        "Esc quit",
+        "F1 help",
+    ];
+
+    let mut out = String::new();
+    for (idx, item) in SHORTCUTS.iter().enumerate() {
+        let separator = if out.is_empty() { "" } else { " | " };
+        let projected = char_width(&out) + char_width(separator) + char_width(item);
+        if projected > max_width {
+            if !out.is_empty() && char_width(&out) + 2 <= max_width {
+                out.push_str(" …");
+            }
+            break;
+        }
+        out.push_str(separator);
+        out.push_str(item);
+        // Leave space for at least one more item to avoid frequent truncation flicker
+        if idx + 1 == SHORTCUTS.len() {
+            break;
+        }
+    }
+    out
+}
+
+// Legacy helper retained for tests/compat; superseded by `footer_shortcuts` in the live footer.
 pub fn footer_legend(show_help: bool) -> &'static str {
     if show_help {
         "Esc quit • arrows nav • Tab focus • Enter view • F8 editor • F1-F9 commands • y copy"
@@ -1303,7 +1484,11 @@ pub fn footer_legend(show_help: bool) -> &'static str {
     }
 }
 
-pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Result<()> {
+pub fn run_tui(
+    data_dir_override: Option<std::path::PathBuf>,
+    once: bool,
+    progress: Option<std::sync::Arc<crate::indexer::IndexingProgress>>,
+) -> Result<()> {
     if once
         && std::env::var("TUI_HEADLESS")
             .map(|v| v == "1")
@@ -1403,6 +1588,33 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
     // Mouse support: track layout regions for click/scroll handling
     let mut last_detail_area: Option<Rect> = None;
     let mut last_pane_rects: Vec<Rect> = Vec::new();
+
+    // Helper to render progress
+    let render_progress = |progress: &std::sync::Arc<crate::indexer::IndexingProgress>| -> String {
+        use std::sync::atomic::Ordering;
+        let phase = progress.phase.load(Ordering::Relaxed);
+        if phase == 0 {
+            return String::new();
+        }
+        let total = progress.total.load(Ordering::Relaxed);
+        let current = progress.current.load(Ordering::Relaxed);
+        let is_rebuild = progress.is_rebuilding.load(Ordering::Relaxed);
+
+        let phase_str = if phase == 1 { "Scanning" } else { "Indexing" };
+        let pct = if total > 0 {
+            (current as f32 / total as f32 * 100.0) as usize
+        } else {
+            0
+        };
+
+        let mut s = format!(" | {} {}/{} ({}%)", phase_str, current, total, pct);
+        if is_rebuild {
+            s.push_str(" [REBUILDING INDEX - Search unavailable]");
+        } else {
+            s.push_str(" [Updating]");
+        }
+        s
+    };
 
     loop {
         // Check for terminal resize and recalculate pane limit if needed
@@ -1730,57 +1942,13 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     let content_para = match detail_tab {
                         DetailTab::Messages => {
                             if let Some(full) = detail {
-                                let mut lines = Vec::new();
-                                for msg in full.messages {
-                                    let role_label = match msg.role {
-                                        MessageRole::User => "you",
-                                        MessageRole::Agent => "agent",
-                                        MessageRole::Tool => "tool",
-                                        MessageRole::System => "system",
-                                        MessageRole::Other(ref r) => r.as_str(),
-                                    };
-                                    let ts = msg
-                                        .created_at
-                                        .map(|t| format!(" ({})", format_relative_time(t)))
-                                        .unwrap_or_default();
-                                    lines.push(Line::from(vec![
-                                        Span::styled(
-                                            format!("[{role_label}]"),
-                                            role_style(&msg.role, palette),
-                                        ),
-                                        Span::raw(ts),
-                                    ]));
-                                    let mut in_code = false;
-                                    for line_text in msg.content.lines() {
-                                        if line_text.trim_start().starts_with("```") {
-                                            in_code = !in_code;
-                                            lines.push(Line::from(Span::styled(
-                                                line_text.to_string(),
-                                                Style::default().fg(palette.hint),
-                                            )));
-                                            continue;
-                                        }
-                                        let base = if in_code {
-                                            Style::default().bg(palette.surface)
-                                        } else {
-                                            Style::default()
-                                        };
-                                        let rendered = highlight_terms_owned_with_style(
-                                            line_text.to_string(),
-                                            &last_query,
-                                            palette,
-                                            base,
-                                        );
-                                        lines.push(rendered);
-                                    }
-                                    lines.push(Line::from(""));
-                                }
+                                let lines = render_parsed_content(&full, &last_query, palette);
                                 if lines.is_empty() {
                                     Paragraph::new("No messages")
                                         .style(Style::default().fg(palette.hint))
                                 } else {
                                     Paragraph::new(lines)
-                                        .wrap(Wrap { trim: true })
+                                        .wrap(Wrap { trim: false })
                                         .scroll((detail_scroll, 0))
                                 }
                             } else {
@@ -1909,26 +2077,30 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                     );
                 }
 
-                // Simplified footer: status + non-default modes + legend
+                // Footer: status + modes + dense shortcut legend
                 let mut footer_parts: Vec<String> = vec![];
-                // Show spinner when search is pending
                 if dirty_since.is_some() {
                     let spinner = SPINNER_CHARS[spinner_frame % SPINNER_CHARS.len()];
                     footer_parts.push(format!("{} Searching...", spinner));
                 } else if !status.is_empty() {
                     footer_parts.push(status.clone());
                 }
-                // Only show mode if non-default (default is Prefix)
+
+                if let Some(p) = &progress {
+                    let p_str = render_progress(p);
+                    if !p_str.is_empty() {
+                        footer_parts.push(p_str);
+                    }
+                }
+
                 if matches!(match_mode, MatchMode::Standard) {
                     footer_parts.push("mode:standard".to_string());
                 }
-                // Only show ranking if non-default (default is Balanced)
                 match ranking_mode {
                     RankingMode::RecentHeavy => footer_parts.push("rank:recent".to_string()),
                     RankingMode::RelevanceHeavy => footer_parts.push("rank:relevance".to_string()),
                     RankingMode::Balanced => {}
                 }
-                // Only show context if non-default (default is Medium)
                 if !matches!(context_window, ContextWindow::Medium) {
                     footer_parts.push(
                         match context_window {
@@ -1940,14 +2112,27 @@ pub fn run_tui(data_dir_override: Option<std::path::PathBuf>, once: bool) -> Res
                         .to_string(),
                     );
                 }
-                footer_parts.push(footer_legend(show_help).to_string());
                 if peek_badge_until
                     .map(|t| t > Instant::now())
                     .unwrap_or(false)
                 {
                     footer_parts.push("PEEK".to_string());
                 }
-                let footer_line = footer_parts.join(" | ");
+
+                let mut footer_line = footer_parts.join(" | ");
+                let footer_width = chunks[2].width as usize;
+                let reserved =
+                    char_width(&footer_line) + if footer_line.is_empty() { 0 } else { 3 };
+                if footer_width > reserved {
+                    let shortcuts = footer_shortcuts(footer_width.saturating_sub(reserved));
+                    if !shortcuts.is_empty() {
+                        if !footer_line.is_empty() {
+                            footer_line.push_str(" | ");
+                        }
+                        footer_line.push_str(&shortcuts);
+                    }
+                }
+
                 let footer = Paragraph::new(footer_line);
                 f.render_widget(footer, chunks[2]);
 
