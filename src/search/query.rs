@@ -1,16 +1,18 @@
 use anyhow::Result;
 use lru::LruCache;
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery};
 use tantivy::schema::{IndexRecordOption, Term, Value};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{Index, IndexReader, Opstamp, TantivyDocument};
+use tantivy::{Index, IndexReader, Searcher, TantivyDocument};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -46,7 +48,8 @@ pub struct SearchClient {
     sqlite: Option<Connection>,
     prefix_cache: Mutex<CacheShards>,
     last_reload: Mutex<Option<Instant>>,
-    last_opstamp: Mutex<Option<Opstamp>>,
+    last_generation: Mutex<Option<u64>>,
+    reload_epoch: Arc<AtomicU64>,
     warm_tx: Option<mpsc::UnboundedSender<WarmJob>>,
     _warm_handle: Option<JoinHandle<()>>,
     // Shared for warm worker to read cache/filter logic; keep Arc to avoid clones of big data
@@ -105,13 +108,151 @@ struct WarmJob {
     _filters: SearchFilters,
 }
 
+#[derive(Clone)]
+struct SearcherCacheEntry {
+    epoch: u64,
+    searcher: Searcher,
+}
+
+thread_local! {
+    static THREAD_SEARCHER: RefCell<Option<SearcherCacheEntry>> = const { RefCell::new(None) };
+}
+
 fn sanitize_query(raw: &str) -> String {
-    // Replace any character that is not alphanumeric with a space.
+    // Replace any character that is not alphanumeric or asterisk with a space.
+    // Asterisks are preserved for wildcard query support (*foo, foo*, *bar*).
     // This ensures that the input tokens match how SimpleTokenizer splits content.
-    // e.g. "c++" -> "c  ", "foo.bar" -> "foo bar"
+    // e.g. "c++" -> "c  ", "foo.bar" -> "foo bar", "*config*" -> "*config*"
     raw.chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '*' {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect()
+}
+
+/// Escape special regex characters in a string
+fn escape_regex(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        match c {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// Represents different wildcard patterns for a search term
+#[derive(Debug, Clone, PartialEq)]
+enum WildcardPattern {
+    /// No wildcards - exact term match (through edge n-grams)
+    Exact(String),
+    /// Trailing wildcard: foo* (prefix match)
+    Prefix(String),
+    /// Leading wildcard: *foo (suffix match - requires regex)
+    Suffix(String),
+    /// Both wildcards: *foo* (substring match - requires regex)
+    Substring(String),
+}
+
+impl WildcardPattern {
+    fn parse(term: &str) -> Self {
+        let starts_with_star = term.starts_with('*');
+        let ends_with_star = term.ends_with('*');
+
+        let core = term.trim_matches('*').to_lowercase();
+        if core.is_empty() {
+            return WildcardPattern::Exact(String::new());
+        }
+
+        match (starts_with_star, ends_with_star) {
+            (true, true) => WildcardPattern::Substring(core),
+            (true, false) => WildcardPattern::Suffix(core),
+            (false, true) => WildcardPattern::Prefix(core),
+            (false, false) => WildcardPattern::Exact(core),
+        }
+    }
+
+    /// Convert to regex pattern for Tantivy RegexQuery
+    fn to_regex(&self) -> Option<String> {
+        match self {
+            WildcardPattern::Suffix(core) => Some(format!(".*{}", escape_regex(core))),
+            WildcardPattern::Substring(core) => Some(format!(".*{}.*", escape_regex(core))),
+            _ => None,
+        }
+    }
+}
+
+/// Build query clauses for a single term based on its wildcard pattern.
+/// Returns a Vec of (Occur::Should, Query) for use in a BooleanQuery.
+fn build_term_query_clauses(
+    pattern: &WildcardPattern,
+    fields: &crate::search::tantivy::Fields,
+) -> Vec<(Occur, Box<dyn Query>)> {
+    let mut shoulds: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+    match pattern {
+        WildcardPattern::Exact(term) | WildcardPattern::Prefix(term) => {
+            // For exact and prefix patterns, use TermQuery on all fields
+            // (edge n-grams already handle prefix matching)
+            if term.is_empty() {
+                return shoulds;
+            }
+            shoulds.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.title, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+            ));
+            shoulds.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.content, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+            ));
+            shoulds.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.title_prefix, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+            ));
+            shoulds.push((
+                Occur::Should,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(fields.content_prefix, term),
+                    IndexRecordOption::WithFreqsAndPositions,
+                )),
+            ));
+        }
+        WildcardPattern::Suffix(term) | WildcardPattern::Substring(term) => {
+            // For suffix and substring patterns, use RegexQuery
+            if term.is_empty() {
+                return shoulds;
+            }
+            if let Some(regex_pattern) = pattern.to_regex() {
+                // Try to create RegexQuery for content field
+                if let Ok(rq) = RegexQuery::from_pattern(&regex_pattern, fields.content) {
+                    shoulds.push((Occur::Should, Box::new(rq)));
+                }
+                // Also try for title field
+                if let Ok(rq) = RegexQuery::from_pattern(&regex_pattern, fields.title) {
+                    shoulds.push((Occur::Should, Box::new(rq)));
+                }
+            }
+        }
+    }
+
+    shoulds
 }
 
 /// Check if content is primarily a tool invocation (noise that shouldn't appear in search results).
@@ -187,9 +328,17 @@ impl SearchClient {
         }
 
         let shared_filters = Arc::new(Mutex::new(()));
+        let reload_epoch = Arc::new(AtomicU64::new(0));
+        let metrics = Metrics::default();
 
         let warm_pair = if let Some((reader, fields)) = &tantivy {
-            maybe_spawn_warm_worker(reader.clone(), *fields, Arc::downgrade(&shared_filters))
+            maybe_spawn_warm_worker(
+                reader.clone(),
+                *fields,
+                Arc::downgrade(&shared_filters),
+                reload_epoch.clone(),
+                metrics.clone(),
+            )
         } else {
             None
         };
@@ -199,11 +348,12 @@ impl SearchClient {
             sqlite,
             prefix_cache: Mutex::new(CacheShards::default()),
             last_reload: Mutex::new(None),
-            last_opstamp: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch,
             warm_tx: warm_pair.as_ref().map(|(tx, _)| tx.clone()),
             _warm_handle: warm_pair.map(|(_, h)| h),
             _shared_filters: shared_filters,
-            metrics: Metrics::default(),
+            metrics,
         }))
     }
 
@@ -294,6 +444,35 @@ impl SearchClient {
         Ok(Vec::new())
     }
 
+    fn searcher_for_thread(&self, reader: &IndexReader) -> Searcher {
+        let epoch = self.reload_epoch.load(Ordering::Relaxed);
+        THREAD_SEARCHER.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if let Some(entry) = slot.as_ref()
+                && entry.epoch == epoch
+            {
+                return entry.searcher.clone();
+            }
+            let searcher = reader.searcher();
+            *slot = Some(SearcherCacheEntry {
+                epoch,
+                searcher: searcher.clone(),
+            });
+            searcher
+        })
+    }
+
+    fn track_generation(&self, generation: u64) {
+        let mut guard = self.last_generation.lock().unwrap();
+        if let Some(prev) = *guard
+            && prev != generation
+            && let Ok(mut cache) = self.prefix_cache.lock()
+        {
+            cache.shards.clear();
+        }
+        *guard = Some(generation);
+    }
+
     fn search_tantivy(
         &self,
         reader: &IndexReader,
@@ -304,62 +483,23 @@ impl SearchClient {
         offset: usize,
     ) -> Result<Vec<SearchHit>> {
         self.maybe_reload_reader(reader)?;
-        let searcher = reader.searcher();
-
-        // Invalidate cache if index generation changed
-        if let Ok(meta) = searcher.index().load_metas() {
-            let current_opstamp = meta.opstamp;
-            let mut last_op_guard = self.last_opstamp.lock().unwrap();
-            if let Some(last) = *last_op_guard
-                && last != current_opstamp
-                && let Ok(mut cache) = self.prefix_cache.lock()
-            {
-                cache.shards.clear();
-            }
-            *last_op_guard = Some(current_opstamp);
-        }
+        let searcher = self.searcher_for_thread(reader);
+        self.track_generation(searcher.generation().generation_id());
 
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-        // Manual query construction for "search-as-you-type" prefix support.
+        // Manual query construction for "search-as-you-type" with wildcard support.
         // We treat each whitespace-separated token as a MUST clause.
         // Each token matches if it appears in title OR content OR their prefix variants.
+        // Wildcard patterns (*foo, foo*, *foo*) are converted to regex queries.
         let terms: Vec<&str> = query.split_whitespace().collect();
         if !terms.is_empty() {
             for term_str in terms {
-                let term_lower = term_str.to_lowercase();
-                // Match in title, content, or their prefix (edge n-gram) variants
-                let term_shoulds: Vec<(Occur, Box<dyn Query>)> = vec![
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.title, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.content, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.title_prefix, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                    (
-                        Occur::Should,
-                        Box::new(TermQuery::new(
-                            Term::from_field_text(fields.content_prefix, &term_lower),
-                            IndexRecordOption::WithFreqsAndPositions,
-                        )),
-                    ),
-                ];
-                clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
+                let pattern = WildcardPattern::parse(term_str);
+                let term_shoulds = build_term_query_clauses(&pattern, fields);
+                if !term_shoulds.is_empty() {
+                    clauses.push((Occur::Must, Box::new(BooleanQuery::new(term_shoulds))));
+                }
             }
         } else {
             clauses.push((Occur::Must, Box::new(AllQuery)));
@@ -583,6 +723,7 @@ struct Metrics {
     cache_miss: Arc<Mutex<u64>>,
     cache_shortfall: Arc<Mutex<u64>>,
     reloads: Arc<Mutex<u64>>,
+    reload_ms_total: Arc<Mutex<u128>>,
 }
 
 impl Metrics {
@@ -597,6 +738,10 @@ impl Metrics {
     }
     fn inc_reload(&self) {
         *self.reloads.lock().unwrap() += 1;
+    }
+    fn record_reload(&self, duration: Duration) {
+        self.inc_reload();
+        *self.reload_ms_total.lock().unwrap() += duration.as_millis();
     }
 
     #[cfg(test)]
@@ -614,6 +759,8 @@ fn maybe_spawn_warm_worker(
     reader: IndexReader,
     fields: crate::search::tantivy::Fields,
     filters_guard: std::sync::Weak<Mutex<()>>,
+    reload_epoch: Arc<AtomicU64>,
+    metrics: Metrics,
 ) -> Option<(mpsc::UnboundedSender<WarmJob>, JoinHandle<()>)> {
     // Only spawn if a Tokio runtime is available (tests may call without one).
     if Handle::try_current().is_err() {
@@ -633,7 +780,19 @@ fn maybe_spawn_warm_worker(
             if filters_guard.upgrade().is_none() {
                 break;
             }
-            let _ = reader.reload();
+            let reload_started = Instant::now();
+            if let Err(err) = reader.reload() {
+                tracing::warn!(error = ?err, "warm_worker_reload_failed");
+                continue;
+            }
+            let elapsed = reload_started.elapsed();
+            let epoch = reload_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            metrics.record_reload(elapsed);
+            tracing::debug!(
+                duration_ms = elapsed.as_millis() as u64,
+                reload_epoch = epoch,
+                "warm_worker_reload"
+            );
             // Run a tiny warm search to prefill OS cache and hit the Tantivy reader
             // without allocating full result sets. Limit 1 doc.
             let searcher = reader.searcher();
@@ -820,9 +979,17 @@ impl SearchClient {
             .map(|t| now.duration_since(t) >= MIN_RELOAD_INTERVAL)
             .unwrap_or(true)
         {
+            let reload_started = Instant::now();
             reader.reload()?;
+            let elapsed = reload_started.elapsed();
             *guard = Some(now);
-            self.metrics.inc_reload();
+            let epoch = self.reload_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+            self.metrics.record_reload(elapsed);
+            tracing::debug!(
+                duration_ms = elapsed.as_millis() as u64,
+                reload_epoch = epoch,
+                "tantivy_reader_reload"
+            );
         }
         Ok(())
     }
@@ -894,7 +1061,8 @@ mod tests {
             sqlite: None,
             prefix_cache: Mutex::new(CacheShards::default()),
             last_reload: Mutex::new(None),
-            last_opstamp: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
             _shared_filters: Arc::new(Mutex::new(())),
@@ -1346,5 +1514,52 @@ mod tests {
         // Or rely on correctness of results if we searched a common prefix?
 
         Ok(())
+    }
+
+    #[test]
+    fn track_generation_clears_cache_on_change() {
+        let client = SearchClient {
+            reader: None,
+            sqlite: None,
+            prefix_cache: Mutex::new(CacheShards::default()),
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+        };
+
+        let hit = SearchHit {
+            title: "hello world".into(),
+            snippet: "hello".into(),
+            content: "hello world".into(),
+            score: 1.0,
+            source_path: "p".into(),
+            agent: "a".into(),
+            workspace: "w".into(),
+            created_at: None,
+            line_number: None,
+        };
+        let hits = vec![hit];
+
+        client.put_cache("hello", &SearchFilters::default(), &hits);
+        {
+            let cache = client.prefix_cache.lock().unwrap();
+            assert!(!cache.shards.is_empty());
+        }
+
+        client.track_generation(1);
+        {
+            let cache = client.prefix_cache.lock().unwrap();
+            assert!(!cache.shards.is_empty());
+        }
+
+        client.track_generation(2);
+        {
+            let cache = client.prefix_cache.lock().unwrap();
+            assert!(cache.shards.is_empty());
+        }
     }
 }
