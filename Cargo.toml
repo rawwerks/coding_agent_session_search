@@ -46,6 +46,7 @@ semver = "*"
 tracing-appender = "*"
 strsim = "0.11.1"
 once_cell = "*"
+syntect = "*"
 
 [build-dependencies]
 vergen = { version = "*", default-features = false, features = ["build", "cargo"] }
@@ -57,6 +58,7 @@ tempfile = "*"
 insta = { version = "*", features = ["yaml", "json"] }
 criterion = "*"
 once_cell = "*"
+serial_test = "*"
 
 [[bin]]
 name = "cass"

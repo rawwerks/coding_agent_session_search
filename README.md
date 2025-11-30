@@ -34,11 +34,22 @@ install.ps1 -EasyMode -Verify
 - **Smart Tokenization**: Handles `snake_case` ("my_var" matches "my" and "var"), hyphenated terms, and code symbols (`c++`, `foo.bar`) correctly.
 - **Zero-Stall Updates**: The background indexer commits changes atomically; `reader.reload()` ensures new messages appear in the search bar immediately without restarting.
 
+### 🎯 Advanced Search Features
+- **Wildcard Patterns**: Full glob-style pattern support:
+  - `foo*` - Prefix match (finds "foobar", "foo123")
+  - `*foo` - Suffix match (finds "barfoo", "configfoo")
+  - `*foo*` - Substring match (finds "afoob", "configuration")
+- **Auto-Fuzzy Fallback**: When exact searches return sparse results, automatically retries with `*term*` wildcards to broaden matches. Visual indicator shows when fallback is active.
+- **Query History Deduplication**: Recent searches deduplicated to show unique queries; navigate with `Up`/`Down` arrows.
+- **Match Quality Ranking**: New ranking mode (cycle with `F12`) that prioritizes exact matches over wildcard/fuzzy results.
+
 ### 🖥️ Rich Terminal UI (TUI)
 - **Three-Pane Layout**: Filter bar (top), scrollable results (left), and syntax-highlighted details (right).
+- **Multi-Line Result Display**: Each result shows location and up to 3 lines of context; alternating stripes improve scanability.
 - **Live Status**: Footer shows real-time indexing progress (e.g., `Indexing 150/2000 (7%)`) and active filters.
 - **Mouse Support**: Click to select results, scroll panes, or clear filters.
-- **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System).
+- **Theming**: Adaptive Dark/Light modes with role-colored messages (User/Assistant/System). Toggle border style (`Ctrl+B`) between rounded Unicode and plain ASCII.
+- **Ranking Modes**: Cycle through `recent`/`balanced`/`relevance`/`quality` with `F12`; quality mode penalizes fuzzy matches.
 
 ### 🔗 Universal Connectors
 Ingests history from all major local agents, normalizing them into a unified `Conversation -> Message -> Snippet` model:
@@ -211,11 +222,16 @@ cass
 
 ### 3. Usage
 - **Type to search**: "python error", "refactor auth", "c++".
-- **Navigation**: `Up`/`Down` to select, `Right` to focus detail pane.
+- **Wildcards**: Use `foo*` (prefix), `*foo` (suffix), or `*foo*` (contains) for flexible matching.
+- **Navigation**: `Up`/`Down` to select, `Right` to focus detail pane. `Up`/`Down` in search bar navigates query history.
 - **Filters**:
     - `F3`: Filter by Agent (e.g., "codex").
     - `F4`: Filter by Workspace/Project.
     - `F5`/`F6`: Time filters (Today, Week, etc.).
+- **Modes**:
+    - `F2`: Toggle Dark/Light theme.
+    - `F12`: Cycle ranking mode (recent → balanced → relevance → quality).
+    - `Ctrl+B`: Toggle rounded/plain borders.
 - **Actions**:
     - `Enter`: Open original log file in `$EDITOR`.
     - `y`: Copy file path or snippet to clipboard.
@@ -295,6 +311,12 @@ The project ships with a robust installer (`install.sh` / `install.ps1`) designe
 
 - **Updates**: Interactive TUI checks for GitHub releases on startup. Skip with `CODING_AGENT_SEARCH_NO_UPDATE_PROMPT=1` or `TUI_HEADLESS=1`.
 
+- **Cache tuning**: `CASS_CACHE_SHARD_CAP` (per-shard entries, default 256) and `CASS_CACHE_TOTAL_CAP` (total cached hits across shards, default 2048) control prefix cache size; raise cautiously to avoid memory bloat.
+
+- **Cache debug**: set `CASS_DEBUG_CACHE_METRICS=1` to emit cache hit/miss/shortfall/reload stats via tracing (debug level).
+
+- **Watch testing (dev only)**: `cass index --watch --watch-once path1,path2` triggers a single reindex without filesystem notify (also respects `CASS_TEST_WATCH_PATHS` for backward compatibility); useful for deterministic tests/smoke runs.
+
 
 
 ## 🩺 Troubleshooting
@@ -361,6 +383,8 @@ cargo test --test install_scripts
 - Rebuilds auto-trigger when the schema hash changes; index directory is recreated as needed. Tokenizer: `hyphen_normalize` to keep “cma-es” searchable while enabling prefix splits.
 
 ### Search pipeline (src/search/query.rs)
+- **Wildcard patterns**: `WildcardPattern` enum supports `Exact`, `Prefix` (foo*), `Suffix` (*foo), and `Substring` (*foo*). Prefix uses edge n-grams; suffix/substring use Tantivy `RegexQuery` with escaped special characters.
+- **Auto-fuzzy fallback**: `search_with_fallback()` wraps the base search; if results < threshold and query has no wildcards, retries with `*term*` patterns and sets `wildcard_fallback` flag for UI indicator.
 - Cache-first: per-agent + global LRU shards (env `CASS_CACHE_SHARD_CAP`, default 256). Cached hits store lowered content/title/snippet and a 64-bit bloom mask; bloom + substring keeps validation fast.
 - Fallback order: Tantivy (primary) → SQLite FTS (consistency) with deduping/noise filtering. Prefix-only snippet path tries cached prefix snippet, then a cheap local snippet, else Tantivy `SnippetGenerator`.
 - Warm worker: runtime-aware, debounced (env `CASS_WARM_DEBOUNCE_MS`, default 120 ms), runs a tiny 1-doc search to keep the reader hot; reloads are debounced (300 ms) and counted in metrics (cache hit/miss/shortfall/reloads tracked internally).
