@@ -125,3 +125,42 @@ fn codex_connector_filters_token_count() {
         assert!(!msg.content.trim().is_empty());
     }
 }
+
+#[test]
+fn codex_connector_respects_since_ts_for_iso_and_millis() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/2025/11/24");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("rollout-since.jsonl");
+
+    // Two messages: one older (ISO string), one newer (millis). since_ts should exclude the older.
+    let sample = r#"{"timestamp":"2025-09-30T15:42:34.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old msg"}]}}
+{"timestamp":1700000100000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"new msg"}]}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("CODEX_HOME", dir.path());
+    }
+
+    let connector = CodexConnector::new();
+    // since_ts set between the two messages: should drop the first and keep the second
+    let ctx = ScanContext {
+        data_root: dir.path().to_path_buf(),
+        since_ts: Some(1_700_000_000_000),
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+    let c = &convs[0];
+
+    assert_eq!(
+        c.messages.len(),
+        1,
+        "expected only messages newer than since_ts"
+    );
+    let msg = &c.messages[0];
+    assert_eq!(msg.role, "assistant");
+    assert!(msg.content.contains("new msg"));
+    // idx should be re-sequenced after filtering
+    assert_eq!(msg.idx, 0);
+}
