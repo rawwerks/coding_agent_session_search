@@ -10,8 +10,9 @@ use notify::{RecursiveMode, Watcher, recommended_watcher};
 
 use crate::connectors::NormalizedConversation;
 use crate::connectors::{
-    Connector, amp::AmpConnector, claude_code::ClaudeCodeConnector, cline::ClineConnector,
-    codex::CodexConnector, gemini::GeminiConnector, opencode::OpenCodeConnector,
+    Connector, aider::AiderConnector, amp::AmpConnector, claude_code::ClaudeCodeConnector,
+    cline::ClineConnector, codex::CodexConnector, gemini::GeminiConnector,
+    opencode::OpenCodeConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir};
 use crate::storage::sqlite::SqliteStorage;
@@ -89,6 +90,7 @@ pub fn run_index(opts: IndexOptions) -> Result<()> {
         ("claude", Box::new(ClaudeCodeConnector::new())),
         ("opencode", Box::new(OpenCodeConnector::new())),
         ("amp", Box::new(AmpConnector::new())),
+        ("aider", Box::new(AiderConnector::new())),
     ];
 
     // First pass: Scan all to get counts if we have progress tracker

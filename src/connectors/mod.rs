@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod aider;
 pub mod amp;
 pub mod claude_code;
 pub mod cline;
