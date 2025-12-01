@@ -5020,17 +5020,8 @@ pub fn run_tui(
                                 // User committed to viewing result in editor - save query to history
                                 save_query_to_history(&query, &mut query_history, history_cap);
                                 let path = &hit.source_path;
-                                // Prefer line_number field, fallback to parsing snippet
-                                let line_hint = hit.line_number.or_else(|| {
-                                    hit.snippet
-                                        .find("line ")
-                                        .and_then(|i| {
-                                            hit.snippet[i + 5..].split_whitespace().next()
-                                        })
-                                        .and_then(|s| s.parse::<usize>().ok())
-                                });
                                 let mut cmd = StdCommand::new(&editor_cmd);
-                                if let Some(line) = line_hint {
+                                if let Some(line) = hit.line_number {
                                     cmd.arg(format!("{}{}", editor_line_flag, line));
                                 }
                                 let _ = cmd.arg(path).status();

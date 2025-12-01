@@ -1345,6 +1345,10 @@ impl SearchClient {
                 .unwrap_or("")
                 .to_string();
             let created_at = doc.get_first(fields.created_at).and_then(|v| v.as_i64());
+            let line_number = doc
+                .get_first(fields.msg_idx)
+                .and_then(|v| v.as_u64())
+                .map(|i| (i + 1) as usize);
             hits.push(SearchHit {
                 title,
                 snippet,
@@ -1354,7 +1358,7 @@ impl SearchClient {
                 agent,
                 workspace,
                 created_at,
-                line_number: None, // TODO: populate from index if stored
+                line_number,
                 match_type: query_match_type,
             });
         }
