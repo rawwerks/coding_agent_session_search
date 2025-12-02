@@ -360,15 +360,17 @@ Returns in <50ms:
 - **Exit 0:** Healthy—proceed with queries
 - **Exit 1:** Unhealthy—run `cass index --full` first
 
-JSON output:
+JSON output (healthy):
 ```json
-{"healthy": true, "latency_ms": 12}
+{"healthy": true, "latency_ms": 3, "state": {"index": {"exists": true, "fresh": true, ...}, "database": {...}, "pending": {...}}}
 ```
 
-Or when unhealthy:
+When unhealthy (exit 1), includes detailed state for diagnosis:
 ```json
-{"healthy": false, "latency_ms": 8, "issues": ["database not found", "index missing"]}
+{"healthy": false, "latency_ms": 5, "state": {"index": {"exists": false, ...}, "database": {...}, "pending": {...}}}
 ```
+
+The `state` object mirrors the `cass state --json` output, providing index freshness, database stats, and pending session count.
 
 **Recommended agent workflow:**
 1. `cass health --json` → Check exit code

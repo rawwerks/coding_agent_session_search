@@ -328,6 +328,7 @@ pub enum RobotTopic {
     Env,
     Paths,
     Schemas,
+    Guide,
     ExitCodes,
     Examples,
     Contracts,
@@ -598,6 +599,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     const VALID_SHORT_FLAGS: &[&str] = &["-q", "-v", "-h", "-V"];
 
     // Global flags that take a value via separate argument (--flag VALUE)
+    // Note: --data-dir is NOT a global flag - it's per-subcommand
     let global_with_value = |s: &str| {
         matches!(
             s,
@@ -606,6 +608,7 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     };
 
     // Global flags that take a value via `=` syntax or are standalone
+    // Note: --data-dir is NOT a global flag - it's per-subcommand
     let is_global = |s: &str| {
         s == "--color"
             || s.starts_with("--color=")
@@ -973,26 +976,37 @@ fn get_contextual_hints(intent: &str, raw_str: &str) -> Vec<String> {
 }
 
 /// Get common mistakes for a given intent.
+///
+/// Note: Only include mistakes that would actually fail after normalization.
+/// Commands that get auto-corrected and succeed (like `cass ls --robot` → `cass stats --robot`)
+/// should NOT be listed here since the user would never see this error message.
 fn get_common_mistakes(intent: &str) -> Option<serde_json::Value> {
     let mistakes = if intent.contains("search") {
         vec![
+            // query="foo" without subcommand - normalization adds "search" but the syntax is wrong
             ("cass query=\"foo\" --robot", "cass search \"foo\" --robot"),
-            ("cass -robot find error", "cass search \"error\" --robot"),
+            // Bare limit= without dashes
             (
                 "cass search \"query\" limit=5",
                 "cass search \"query\" --limit 5",
             ),
+            // Missing query entirely
+            ("cass search --robot --limit 5", "cass search \"your query\" --robot --limit 5"),
         ]
     } else if intent.contains("documentation") {
         vec![
+            // Flag syntax for subcommand (--robot-docs gets normalized but shown for education)
             ("cass --robot-docs", "cass robot-docs"),
             ("cass --robot-docs=commands", "cass robot-docs commands"),
-            ("cass docs --robot", "cass robot-docs"),
+            // Adding --robot to robot-docs (which doesn't accept it)
+            ("cass robot-docs --robot", "cass robot-docs"),
         ]
     } else if intent.contains("statistics") {
+        // Note: `cass ls --robot` actually works (normalizes to `cass stats --robot`)
+        // so we show mistakes that would actually fail
         vec![
-            ("cass ls --robot", "cass stats --robot"),
-            ("cass list --robot", "cass stats --robot"),
+            // Missing required output flag for piping
+            ("cass stats | jq .", "cass stats --json | jq ."),
         ]
     } else {
         return None;
@@ -1222,6 +1236,7 @@ pub async fn run() -> CliResult<()> {
         .any(|s| s == "--json" || s == "--robot" || s == "-json" || s == "-robot")
         || matches!(&cli.command, Some(Commands::Capabilities { .. }))
         || matches!(&cli.command, Some(Commands::Introspect { .. }));
+    let is_doc_mode = cli.robot_help || matches!(&cli.command, Some(Commands::RobotDocs { .. }));
 
     // Combine all correction notes
     let all_notes: Vec<&str> = [parse_note.as_deref(), heuristic_note.as_deref()]
@@ -1229,7 +1244,7 @@ pub async fn run() -> CliResult<()> {
         .flatten()
         .collect();
 
-    if !all_notes.is_empty() {
+    if !all_notes.is_empty() && !is_doc_mode {
         if is_robot_mode {
             // Output JSON-formatted correction notice for agents
             let correction_json = serde_json::json!({
@@ -1559,7 +1574,11 @@ async fn execute_cli(
                 Commands::Introspect { json } => {
                     run_introspect(json)?;
                 }
-                Commands::Health { data_dir, json, stale_threshold } => {
+                Commands::Health {
+                    data_dir,
+                    json,
+                    stale_threshold,
+                } => {
                     run_health(&data_dir, cli.db.clone(), json, stale_threshold)?;
                 }
                 _ => {}
@@ -1804,6 +1823,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  Use -v/--verbose with --json to enable INFO logs if needed",
         "",
         "Subcommands: search | stats | view | index | tui | robot-docs <topic>",
+        "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap",
         "Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown",
         "More: cass robot-docs examples | cass robot-docs commands",
     ];
@@ -1864,6 +1884,15 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             lines.push("  trace: user-provided path (JSONL).".to_string());
             lines
         }
+        RobotTopic::Guide => vec![
+            "guide:".to_string(),
+            "  Robot-mode handbook: docs/ROBOT_MODE.md (automation quickstart)".to_string(),
+            "  Output: --robot/--json; JSONL via --robot-format jsonl; compact via --robot-format compact".to_string(),
+            "  Logging: INFO auto-suppressed in robot mode; add -v to re-enable".to_string(),
+            "  Args: accepts --robot-docs=topic and misplaced globals; detailed errors with examples on parse failure".to_string(),
+            "  Safety: prefer --color=never in non-TTY; use --trace-file for spans; reset TUI via `cass tui --reset-state`".to_string(),
+            "  Quick refs: cass --robot-help | cass robot-docs commands | cass robot-docs examples".to_string(),
+        ],
         RobotTopic::Schemas => render_schema_docs(),
         RobotTopic::ExitCodes => vec![
             "exit-codes:".to_string(),
@@ -3516,7 +3545,9 @@ fn run_health(
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    let healthy = db_exists && index_exists && index_fresh && pending_sessions == 0;
+    // Core operational health: can the tool be used at all?
+    // Freshness and pending sessions are informational (reported in state) but don't prevent searching
+    let healthy = db_exists && index_exists;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     if json {
@@ -3531,6 +3562,13 @@ fn run_health(
         );
     } else if healthy {
         println!("✓ Healthy ({latency_ms}ms)");
+        // Show informational warnings even when healthy
+        if !index_fresh {
+            println!("  Note: index stale (older than {}s)", stale_threshold);
+        }
+        if pending_sessions > 0 {
+            println!("  Note: {pending_sessions} sessions pending reindex");
+        }
     } else {
         println!("✗ Unhealthy ({latency_ms}ms)");
         if !db_exists {
@@ -3538,13 +3576,8 @@ fn run_health(
         }
         if !index_exists {
             println!("  - index not found");
-        } else if !index_fresh {
-            println!("  - index stale (older than {}s)", stale_threshold);
         }
-        if pending_sessions > 0 {
-            println!("  - {pending_sessions} sessions pending reindex");
-        }
-        println!("Run 'cass index --full' or 'cass index --watch' to refresh.");
+        println!("Run 'cass index --full' or 'cass index --watch' to create index.");
     }
 
     if healthy {
@@ -4523,6 +4556,56 @@ fn build_response_schemas() -> std::collections::HashMap<String, serde_json::Val
                     }
                 },
                 "db_path": { "type": "string" }
+            }
+        }),
+    );
+
+    schemas.insert(
+        "health".to_string(),
+        json!({
+            "type": "object",
+            "properties": {
+                "healthy": { "type": "boolean" },
+                "latency_ms": { "type": "integer" },
+                "state": {
+                    "type": "object",
+                    "properties": {
+                        "_meta": {
+                            "type": "object",
+                            "properties": {
+                                "data_dir": { "type": "string" },
+                                "db_path": { "type": "string" },
+                                "timestamp": { "type": "string" }
+                            }
+                        },
+                        "database": {
+                            "type": "object",
+                            "properties": {
+                                "exists": { "type": "boolean" },
+                                "conversations": { "type": "integer" },
+                                "messages": { "type": "integer" }
+                            }
+                        },
+                        "index": {
+                            "type": "object",
+                            "properties": {
+                                "exists": { "type": "boolean" },
+                                "fresh": { "type": "boolean" },
+                                "last_indexed_at": { "type": ["string", "null"] },
+                                "age_seconds": { "type": ["integer", "null"] },
+                                "stale": { "type": "boolean" },
+                                "stale_threshold_seconds": { "type": "integer" }
+                            }
+                        },
+                        "pending": {
+                            "type": "object",
+                            "properties": {
+                                "sessions": { "type": "integer" },
+                                "watch_active": { "type": ["boolean", "null"] }
+                            }
+                        }
+                    }
+                }
             }
         }),
     );
