@@ -671,15 +671,75 @@ fn aider_gt_in_code_not_user_input() {
 // DETECTION TESTS
 // =============================================================================
 
-/// Test detect always returns true with evidence
+/// Detect should only succeed when an aider history is actually present
+/// and the probe should remain fast (no recursive walk on every call).
 #[test]
-fn aider_detect_returns_detected() {
+fn aider_detect_requires_marker_and_is_fast() {
+    use std::time::Instant;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prev_dir = std::env::current_dir().unwrap();
+    let prev_env = std::env::var("CASS_AIDER_DATA_ROOT").ok();
+    unsafe {
+        std::env::remove_var("CASS_AIDER_DATA_ROOT");
+    }
+    std::env::set_current_dir(tmp.path()).unwrap();
+
+    // Build a moderately large directory tree to catch accidental recursion.
+    for i in 0..50 {
+        let dir = tmp.path().join(format!("nested/{i}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("noise.txt"), "noise").unwrap();
+    }
+
+    let start = Instant::now();
+    let conn = AiderConnector::new();
+    let result = conn.detect();
+    let elapsed = start.elapsed();
+
+    // No marker -> should not report detected
+    assert!(
+        !result.detected,
+        "detect() should be false without marker files"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "detect() should be fast without scanning entire tree"
+    );
+
+    // Restore working directory and env
+    std::env::set_current_dir(&prev_dir).unwrap();
+    match prev_env {
+        Some(v) => unsafe { std::env::set_var("CASS_AIDER_DATA_ROOT", v) },
+        None => unsafe { std::env::remove_var("CASS_AIDER_DATA_ROOT") },
+    }
+}
+
+/// Detect succeeds when .aider.chat.history.md is present in cwd
+#[test]
+fn aider_detect_with_marker_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let prev_dir = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+
+    let marker = tmp.path().join(".aider.chat.history.md");
+    std::fs::write(&marker, "stub").unwrap();
+
     let conn = AiderConnector::new();
     let result = conn.detect();
 
-    assert!(result.detected);
-    assert!(!result.evidence.is_empty());
-    assert!(result.evidence[0].contains("aider"));
+    assert!(
+        result.detected,
+        "detect() should succeed when marker exists"
+    );
+    assert!(
+        result
+            .evidence
+            .iter()
+            .any(|e| e.contains(".aider.chat.history.md"))
+    );
+
+    std::env::set_current_dir(&prev_dir).unwrap();
 }
 
 // =============================================================================
