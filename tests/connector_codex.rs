@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use coding_agent_search::connectors::{Connector, ScanContext, codex::CodexConnector};
+use serial_test::serial;
 
 #[test]
+#[serial]
 fn codex_connector_reads_modern_envelope_jsonl() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/21");
@@ -42,6 +44,7 @@ fn codex_connector_reads_modern_envelope_jsonl() {
 }
 
 #[test]
+#[serial]
 fn codex_connector_includes_agent_reasoning() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/22");
@@ -88,6 +91,7 @@ fn codex_connector_includes_agent_reasoning() {
 }
 
 #[test]
+#[serial]
 fn codex_connector_filters_token_count() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/23");
@@ -126,15 +130,23 @@ fn codex_connector_filters_token_count() {
     }
 }
 
+/// Test that since_ts uses FILE-LEVEL filtering, not message-level.
+///
+/// NOTE: We intentionally removed message-level timestamp filtering because
+/// it caused data loss during incremental re-indexing. When a file is modified,
+/// ALL messages in that file are ingested, regardless of individual timestamps.
+/// The since_ts is ONLY used to decide whether to process the file at all
+/// (based on file mtime vs since_ts).
 #[test]
-#[ignore = "flaky in CI: CODEX_HOME env override doesn't propagate reliably"]
-fn codex_connector_respects_since_ts_for_iso_and_millis() {
+#[serial]
+fn codex_connector_respects_since_ts_at_file_level_only() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/24");
     fs::create_dir_all(&sessions).unwrap();
     let file = sessions.join("rollout-since.jsonl");
 
-    // Two messages: one older (ISO string), one newer (millis). since_ts should exclude the older.
+    // Two messages with different timestamps - both should be included
+    // since since_ts filtering happens at the FILE level, not message level.
     let sample = r#"{"timestamp":"2025-09-30T15:42:34.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"old msg"}]}}
 {"timestamp":1700000100000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"new msg"}]}}
 "#;
@@ -145,7 +157,7 @@ fn codex_connector_respects_since_ts_for_iso_and_millis() {
     }
 
     let connector = CodexConnector::new();
-    // since_ts set between the two messages: should drop the first and keep the second
+    // since_ts does NOT filter individual messages anymore - only whole files
     let ctx = ScanContext {
         data_root: dir.path().to_path_buf(),
         since_ts: Some(1_700_000_000_000),
@@ -154,20 +166,22 @@ fn codex_connector_respects_since_ts_for_iso_and_millis() {
     assert_eq!(convs.len(), 1);
     let c = &convs[0];
 
+    // BOTH messages should be present - we don't filter by message timestamp
     assert_eq!(
         c.messages.len(),
-        1,
-        "expected only messages newer than since_ts"
+        2,
+        "file-level filtering means all messages in a processed file are included"
     );
-    let msg = &c.messages[0];
-    assert_eq!(msg.role, "assistant");
-    assert!(msg.content.contains("new msg"));
-    // idx should be re-sequenced after filtering
-    assert_eq!(msg.idx, 0);
+    // Messages should have correct roles
+    assert_eq!(c.messages[0].role, "user");
+    assert!(c.messages[0].content.contains("old msg"));
+    assert_eq!(c.messages[1].role, "assistant");
+    assert!(c.messages[1].content.contains("new msg"));
 }
 
 /// Test legacy .json format parsing
 #[test]
+#[serial]
 fn codex_connector_reads_legacy_json_format() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/25");
@@ -226,6 +240,7 @@ fn codex_connector_reads_legacy_json_format() {
 
 /// Test detection with existing sessions directory
 #[test]
+#[serial]
 fn codex_detect_with_sessions_dir() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions");
@@ -243,6 +258,7 @@ fn codex_detect_with_sessions_dir() {
 
 /// Test detection without sessions directory
 #[test]
+#[serial]
 fn codex_detect_without_sessions_dir() {
     let dir = TempDir::new().unwrap();
     // Don't create sessions directory
@@ -258,6 +274,7 @@ fn codex_detect_without_sessions_dir() {
 
 /// Test `user_message` event type
 #[test]
+#[serial]
 fn codex_connector_handles_user_message_event() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/26");
@@ -292,6 +309,7 @@ fn codex_connector_handles_user_message_event() {
 
 /// Test malformed JSONL lines are skipped gracefully
 #[test]
+#[serial]
 fn codex_connector_skips_malformed_lines() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/27");
@@ -325,6 +343,7 @@ also not valid
 
 /// Test multiple sessions in separate files
 #[test]
+#[serial]
 fn codex_connector_handles_multiple_sessions() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/28");
@@ -355,12 +374,11 @@ fn codex_connector_handles_multiple_sessions() {
 
 /// Test empty content messages are filtered
 ///
-/// FIXME: Flaky in CI due to test isolation issues. Multiple Codex tests
 /// set CODEX_HOME env var without proper serialization, causing parallel
 /// tests to interfere with each other. Works locally but fails on CI.
 /// Consider adding serial_test or refactoring to avoid env var mutation.
 #[test]
-#[ignore = "flaky in CI: CODEX_HOME env race condition between parallel tests"]
+#[serial]
 fn codex_connector_filters_empty_content() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/29");
@@ -393,7 +411,9 @@ fn codex_connector_filters_empty_content() {
 }
 
 /// Test title extraction from first user message
+///
 #[test]
+#[serial]
 fn codex_connector_extracts_title() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/11/30");
@@ -425,6 +445,7 @@ fn codex_connector_extracts_title() {
 
 /// Test sequential index assignment
 #[test]
+#[serial]
 fn codex_connector_assigns_sequential_indices() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/01");
@@ -459,6 +480,7 @@ fn codex_connector_assigns_sequential_indices() {
 
 /// Test `external_id` comes from filename
 #[test]
+#[serial]
 fn codex_connector_sets_external_id_from_filename() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/02");
@@ -492,6 +514,7 @@ fn codex_connector_sets_external_id_from_filename() {
 
 /// Test empty sessions directory returns no conversations
 #[test]
+#[serial]
 fn codex_connector_handles_empty_sessions() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions");
@@ -513,6 +536,7 @@ fn codex_connector_handles_empty_sessions() {
 
 /// Test integer (milliseconds) timestamp format
 #[test]
+#[serial]
 fn codex_connector_parses_millis_timestamp() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/03");
@@ -549,6 +573,7 @@ fn codex_connector_parses_millis_timestamp() {
 
 /// Test `tool_use` blocks in content are flattened properly
 #[test]
+#[serial]
 fn codex_connector_flattens_tool_use_blocks() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/04");
@@ -585,6 +610,7 @@ fn codex_connector_flattens_tool_use_blocks() {
 
 /// Test missing cwd in `session_meta` results in None workspace
 #[test]
+#[serial]
 fn codex_connector_handles_missing_cwd() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/05");
@@ -618,6 +644,7 @@ fn codex_connector_handles_missing_cwd() {
 
 /// Test files without rollout- prefix are ignored
 #[test]
+#[serial]
 fn codex_connector_ignores_non_rollout_files() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/06");
@@ -659,6 +686,7 @@ fn codex_connector_ignores_non_rollout_files() {
 
 /// Test legacy JSON with missing optional fields
 #[test]
+#[serial]
 fn codex_connector_handles_legacy_json_missing_session() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/07");
@@ -696,6 +724,7 @@ fn codex_connector_handles_legacy_json_missing_session() {
 
 /// Test title fallback to first message when no user message exists
 #[test]
+#[serial]
 fn codex_connector_title_fallback_to_first_message() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/08");
@@ -727,6 +756,7 @@ fn codex_connector_title_fallback_to_first_message() {
 
 /// Test deeply nested directory structure
 #[test]
+#[serial]
 fn codex_connector_handles_nested_directories() {
     let dir = TempDir::new().unwrap();
     let deep_sessions = dir.path().join("sessions/2025/12/09/sub1/sub2");
@@ -754,6 +784,7 @@ fn codex_connector_handles_nested_directories() {
 
 /// Test `turn_aborted` event is filtered out
 #[test]
+#[serial]
 fn codex_connector_filters_turn_aborted() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/10");
@@ -789,6 +820,7 @@ fn codex_connector_filters_turn_aborted() {
 
 /// Test long title is truncated to 100 chars
 #[test]
+#[serial]
 fn codex_connector_truncates_long_title() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/11");
@@ -822,6 +854,7 @@ fn codex_connector_truncates_long_title() {
 
 /// Test `source_path` matches actual file path
 #[test]
+#[serial]
 fn codex_connector_sets_source_path() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/12");
@@ -851,6 +884,7 @@ fn codex_connector_sets_source_path() {
 
 /// Test metadata indicates correct source format
 #[test]
+#[serial]
 fn codex_connector_metadata_indicates_format() {
     let dir = TempDir::new().unwrap();
     let sessions = dir.path().join("sessions/2025/12/13");
