@@ -398,7 +398,9 @@ fn gemini_handles_missing_chats_dir() {
 #[test]
 fn codex_handles_missing_sessions_dir() {
     let tmp = TempDir::new().unwrap();
-    let codex_home = tmp.path().join("codex-home");
+    // Path must end with "codex" (not "codex-home") for the connector to use it
+    // instead of falling back to the real ~/.codex directory
+    let codex_home = tmp.path().join("codex");
     fs::create_dir_all(&codex_home).unwrap();
     // Don't create sessions/ subdirectory
 

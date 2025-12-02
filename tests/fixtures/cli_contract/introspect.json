@@ -1451,14 +1451,8 @@
     },
     "view": {
       "properties": {
-        "end_line": {
+        "context": {
           "type": "integer"
-        },
-        "highlight_line": {
-          "type": [
-            "integer",
-            "null"
-          ]
         },
         "lines": {
           "items": {
@@ -1469,7 +1463,7 @@
               "highlighted": {
                 "type": "boolean"
               },
-              "number": {
+              "line": {
                 "type": "integer"
               }
             },
@@ -1480,7 +1474,13 @@
         "path": {
           "type": "string"
         },
-        "start_line": {
+        "target_line": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_lines": {
           "type": "integer"
         }
       },

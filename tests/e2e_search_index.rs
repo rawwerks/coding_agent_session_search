@@ -21,9 +21,11 @@ fn make_codex_session(root: &Path, date_path: &str, filename: &str, content: &st
     let sessions = root.join(format!("sessions/{date_path}"));
     fs::create_dir_all(&sessions).unwrap();
     let file = sessions.join(filename);
+    // Trailing newline is critical for append_codex_session to work correctly
     let sample = format!(
         r#"{{"type": "event_msg", "timestamp": {ts}, "payload": {{"type": "user_message", "message": "{content}"}}}}
-{{"type": "response_item", "timestamp": {}, "payload": {{"role": "assistant", "content": "{content}_response"}}}}"#,
+{{"type": "response_item", "timestamp": {}, "payload": {{"role": "assistant", "content": "{content}_response"}}}}
+"#,
         ts + 1000
     );
     fs::write(file, sample).unwrap();
@@ -106,14 +108,7 @@ fn index_full_creates_artifacts() {
 }
 
 /// Incremental re-index must preserve existing messages and ingest new ones from the same file.
-///
-/// FIXME: This test is flaky due to filesystem mtime granularity issues.
-/// File mtimes often have second-level precision while our since_ts uses milliseconds.
-/// When the test runs quickly, the file append may have the same truncated mtime
-/// as the scan timestamp, causing the file to not be detected as modified.
-/// See: https://github.com/Dicklesworthstone/coding_agent_session_search/issues/XXX
 #[test]
-#[ignore = "flaky: filesystem mtime granularity vs millisecond since_ts"]
 fn incremental_reindex_preserves_and_appends_messages() {
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -144,6 +139,9 @@ fn incremental_reindex_preserves_and_appends_messages() {
         .assert()
         .success();
 
+    // Ensure subsequent writes get a later mtime than the recorded scan start
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
     // Baseline search should find the initial content
     let baseline = cargo_bin_cmd!("cass")
         .args(["search", "initial_keep_token", "--robot", "--data-dir"])
@@ -163,6 +161,9 @@ fn incremental_reindex_preserves_and_appends_messages() {
 
     // Append new content to the same file (simulates conversation growth)
     append_codex_session(&session_file, "appended_token_beta", ts + 10_000);
+
+    // On some filesystems, mtime resolution is 1s; give a small buffer before reindex
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     // Incremental re-index (no --full)
     cargo_bin_cmd!("cass")
@@ -213,12 +214,7 @@ fn incremental_reindex_preserves_and_appends_messages() {
 }
 
 /// Reindexing must never drop previously ingested messages in SQLite or Tantivy.
-///
-/// FIXME: This test is flaky due to filesystem mtime granularity issues.
-/// Same issue as incremental_reindex_preserves_and_appends_messages.
-/// See: https://github.com/Dicklesworthstone/coding_agent_session_search/issues/XXX
 #[test]
-#[ignore = "flaky: filesystem mtime granularity vs millisecond since_ts"]
 fn reindex_does_not_drop_messages_in_db_or_search() {
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path();
@@ -248,12 +244,16 @@ fn reindex_does_not_drop_messages_in_db_or_search() {
         .assert()
         .success();
 
+    // Ensure next write has strictly newer mtime than initial scan start
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
     let db_path = data_dir.join("agent_search.db");
     let baseline_count = count_messages(&db_path);
     assert_eq!(baseline_count, 2, "initial two messages recorded");
 
     // Append another turn and reindex incrementally
     append_codex_session(&session_file, "persist_me_again", ts + 5_000);
+    std::thread::sleep(std::time::Duration::from_millis(50));
     cargo_bin_cmd!("cass")
         .args(["index", "--data-dir"])
         .arg(&data_dir)

@@ -82,6 +82,30 @@ impl Drop for EnvGuard {
     }
 }
 
+/// RAII guard for changing the current working directory.
+/// Automatically restores the previous directory on drop, even if a test panics.
+#[allow(dead_code)]
+pub struct CwdGuard {
+    prev: PathBuf,
+}
+
+#[allow(dead_code)]
+impl CwdGuard {
+    /// Change to the given directory and return a guard that restores the previous directory on drop.
+    pub fn change_to(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let prev = std::env::current_dir()?;
+        std::env::set_current_dir(path.as_ref())?;
+        Ok(Self { prev })
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        // Best effort restore - ignore errors during drop
+        let _ = std::env::set_current_dir(&self.prev);
+    }
+}
+
 struct TestWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for TestWriter {

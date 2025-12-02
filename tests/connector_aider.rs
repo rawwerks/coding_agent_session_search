@@ -1,8 +1,12 @@
 use coding_agent_search::connectors::aider::AiderConnector;
 use coding_agent_search::connectors::{Connector, ScanContext};
+use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
+
+mod util;
+use util::{CwdGuard, EnvGuard};
 
 // Helper to create test fixtures
 fn create_aider_fixture(dir: &TempDir, filename: &str, content: &str) -> PathBuf {
@@ -20,7 +24,7 @@ fn create_aider_fixture(dir: &TempDir, filename: &str, content: &str) -> PathBuf
 
 #[test]
 fn aider_parses_chat_history() {
-    let fixture_root = PathBuf::from("tests/fixtures/aider");
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aider");
     let conn = AiderConnector::new();
     let ctx = ScanContext {
         data_root: fixture_root,
@@ -674,16 +678,18 @@ fn aider_gt_in_code_not_user_input() {
 /// Detect should only succeed when an aider history is actually present
 /// and the probe should remain fast (no recursive walk on every call).
 #[test]
+#[serial]
 fn aider_detect_requires_marker_and_is_fast() {
     use std::time::Instant;
 
     let tmp = tempfile::TempDir::new().unwrap();
-    let prev_dir = std::env::current_dir().unwrap();
-    let prev_env = std::env::var("CASS_AIDER_DATA_ROOT").ok();
+
+    // Use RAII guards for cleanup even on panic
+    let _cwd_guard = CwdGuard::change_to(tmp.path()).unwrap();
+    let _env_guard = EnvGuard::set("CASS_AIDER_DATA_ROOT", "");
     unsafe {
         std::env::remove_var("CASS_AIDER_DATA_ROOT");
     }
-    std::env::set_current_dir(tmp.path()).unwrap();
 
     // Build a moderately large directory tree to catch accidental recursion.
     for i in 0..50 {
@@ -706,21 +712,17 @@ fn aider_detect_requires_marker_and_is_fast() {
         elapsed < std::time::Duration::from_millis(200),
         "detect() should be fast without scanning entire tree"
     );
-
-    // Restore working directory and env
-    std::env::set_current_dir(&prev_dir).unwrap();
-    match prev_env {
-        Some(v) => unsafe { std::env::set_var("CASS_AIDER_DATA_ROOT", v) },
-        None => unsafe { std::env::remove_var("CASS_AIDER_DATA_ROOT") },
-    }
+    // Guards automatically restore cwd and env on drop
 }
 
 /// Detect succeeds when .aider.chat.history.md is present in cwd
 #[test]
+#[serial]
 fn aider_detect_with_marker_file() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let prev_dir = std::env::current_dir().unwrap();
-    std::env::set_current_dir(tmp.path()).unwrap();
+
+    // Use RAII guard for cleanup even on panic
+    let _cwd_guard = CwdGuard::change_to(tmp.path()).unwrap();
 
     let marker = tmp.path().join(".aider.chat.history.md");
     std::fs::write(&marker, "stub").unwrap();
@@ -738,8 +740,7 @@ fn aider_detect_with_marker_file() {
             .iter()
             .any(|e| e.contains(".aider.chat.history.md"))
     );
-
-    std::env::set_current_dir(&prev_dir).unwrap();
+    // Guard automatically restores cwd on drop
 }
 
 // =============================================================================

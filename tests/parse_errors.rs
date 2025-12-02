@@ -309,8 +309,8 @@ fn gemini_handles_wrong_messages_type() {
 fn codex_skips_invalid_json() {
     let tmp = TempDir::new().unwrap();
     // Codex connector looks for files in sessions/ directory
-    // and data_root must have "codex" in the name or have sessions/ dir
-    let codex_home = tmp.path().join("codex-home");
+    // and data_root must end with "codex" (not "codex-home") to be used
+    let codex_home = tmp.path().join("codex");
     let sessions = codex_home.join("sessions");
     fs::create_dir_all(&sessions).unwrap();
 
