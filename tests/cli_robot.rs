@@ -177,7 +177,7 @@ fn introspect_repeatable_and_value_types() {
             "limit" => {
                 found_limit = true;
                 assert_eq!(arg["value_type"], "integer");
-                assert_eq!(arg["default"], 10);
+                assert_eq!(arg["default"], "10");
             }
             "aggregate" => {
                 found_aggregate = true;
