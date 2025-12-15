@@ -6468,9 +6468,10 @@ fn run_timeline(
     };
 
     let mut sql = String::from(
-        "SELECT c.id, c.agent, c.title, c.started_at, c.ended_at, c.source_path,
+        "SELECT c.id, a.slug as agent, c.title, c.started_at, c.ended_at, c.source_path,
                 COUNT(m.id) as message_count
          FROM conversations c
+         JOIN agents a ON c.agent_id = a.id
          LEFT JOIN messages m ON m.conversation_id = c.id
          WHERE c.started_at >= ?1 AND c.started_at <= ?2",
     );
@@ -6478,7 +6479,7 @@ fn run_timeline(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(start_ts), Box::new(end_ts)];
 
     if !agents.is_empty() {
-        sql.push_str(" AND c.agent IN (");
+        sql.push_str(" AND a.slug IN (");
         for (i, agent) in agents.iter().enumerate() {
             if i > 0 {
                 sql.push_str(", ");
