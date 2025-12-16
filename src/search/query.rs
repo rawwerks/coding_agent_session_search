@@ -21,12 +21,17 @@ use rusqlite::Connection;
 
 use crate::search::tantivy::fields_from_schema;
 
+use crate::sources::provenance::SourceFilter;
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SearchFilters {
     pub agents: HashSet<String>,
     pub workspaces: HashSet<String>,
     pub created_from: Option<i64>,
     pub created_to: Option<i64>,
+    /// Filter by conversation source (local, remote, or specific source ID)
+    #[serde(skip_serializing_if = "SourceFilter::is_all")]
+    pub source_filter: SourceFilter,
 }
 
 // ============================================================================
@@ -228,7 +233,8 @@ impl QueryExplanation {
         let has_filters = !filters.agents.is_empty()
             || !filters.workspaces.is_empty()
             || filters.created_from.is_some()
-            || filters.created_to.is_some();
+            || filters.created_to.is_some()
+            || !filters.source_filter.is_all();
 
         if has_filters {
             return QueryType::Filtered;
@@ -1706,6 +1712,38 @@ impl SearchClient {
             });
             let range = RangeQuery::new(lower, upper);
             clauses.push((Occur::Must, Box::new(range)));
+        }
+
+        // Source filter (P3.1)
+        match &filters.source_filter {
+            SourceFilter::All => {
+                // No filtering needed
+            }
+            SourceFilter::Local => {
+                // Filter to local sources only (origin_kind == "local")
+                let term = Term::from_field_text(fields.origin_kind, "local");
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+                ));
+            }
+            SourceFilter::Remote => {
+                // Filter to remote sources only (origin_kind == "ssh")
+                // We use "ssh" since that's the only remote kind currently
+                let term = Term::from_field_text(fields.origin_kind, "ssh");
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+                ));
+            }
+            SourceFilter::SourceId(source_id) => {
+                // Filter to specific source by ID
+                let term = Term::from_field_text(fields.source_id, source_id);
+                clauses.push((
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
+                ));
+            }
         }
 
         let q: Box<dyn Query> = if clauses.is_empty() {
@@ -4479,6 +4517,72 @@ mod tests {
         // Cache hit
         let cached = client.search("combotest", filters, 10, 0)?;
         assert_eq!(cached.len(), 1, "Cached result count mismatch");
+
+        Ok(())
+    }
+
+    #[test]
+    fn filter_fidelity_source_filter_respected() -> Result<()> {
+        // P3.1: Source filter should filter by origin_kind or source_id
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        // Local source doc
+        let conv_local = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("local doc".into()),
+            workspace: None,
+            source_path: dir.path().join("local.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "source filter test local".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+            }],
+        };
+        // Remote source doc (would need to be indexed with ssh origin_kind)
+        // For now, test that local filter returns local docs
+        index.add_conversation(&conv_local)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        // Filter for local sources
+        let mut filters = SearchFilters::default();
+        filters.source_filter = SourceFilter::Local;
+
+        let hits = client.search("source", filters.clone(), 10, 0)?;
+
+        // Property: all results should have source_id == "local"
+        for hit in &hits {
+            assert_eq!(
+                hit.source_id, "local",
+                "Source filter violated: got source_id '{}' instead of 'local'",
+                hit.source_id
+            );
+        }
+        assert!(!hits.is_empty(), "Should have found local results");
+
+        // Filter for specific source ID
+        let mut filters_id = SearchFilters::default();
+        filters_id.source_filter = SourceFilter::SourceId("local".to_string());
+
+        let hits_id = client.search("source", filters_id, 10, 0)?;
+        for hit in &hits_id {
+            assert_eq!(
+                hit.source_id, "local",
+                "SourceId filter violated: got '{}' instead of 'local'",
+                hit.source_id
+            );
+        }
+        assert!(!hits_id.is_empty(), "Should have found results for source_id=local");
 
         Ok(())
     }

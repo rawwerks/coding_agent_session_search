@@ -230,6 +230,9 @@ pub enum Commands {
         /// Highlight matching terms in output (uses **bold** markers in text, <mark> in HTML)
         #[arg(long)]
         highlight: bool,
+        /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Show statistics about indexed data
     Stats {
@@ -1586,6 +1589,7 @@ async fn execute_cli(
                     dry_run,
                     timeout,
                     highlight,
+                    source,
                 } => {
                     run_cli_search(
                         &query,
@@ -1620,6 +1624,7 @@ async fn execute_cli(
                         dry_run,
                         timeout,
                         highlight,
+                        source,
                     )?;
                 }
                 Commands::Stats { data_dir, json } => {
@@ -2524,9 +2529,11 @@ fn run_cli_search(
     dry_run: bool,
     timeout_ms: Option<u64>,
     highlight: bool,
+    source: Option<String>,
 ) -> CliResult<()> {
     use crate::search::query::{QueryExplanation, SearchClient, SearchFilters};
     use crate::search::tantivy::index_dir;
+    use crate::sources::provenance::SourceFilter;
     use std::collections::HashSet;
 
     // Start timing for robot_meta elapsed_ms
@@ -2570,6 +2577,11 @@ fn run_cli_search(
     }
     filters.created_from = time_filter.since;
     filters.created_to = time_filter.until;
+
+    // Apply source filter (P3.1)
+    if let Some(ref source_str) = source {
+        filters.source_filter = SourceFilter::parse(source_str);
+    }
 
     // Apply cursor overrides (base64-encoded JSON { "offset": usize, "limit": usize })
     let mut limit_val = *limit;
