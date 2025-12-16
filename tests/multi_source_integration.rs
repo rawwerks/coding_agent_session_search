@@ -797,3 +797,363 @@ fn source_kind_available_via_join() {
     assert_eq!(c2.1, "laptop");
     assert_eq!(c2.2, "ssh");
 }
+
+// =============================================================================
+// P7.4: Collision and Deduplication Tests
+// Tests for edge cases where the same session might appear from multiple sources
+// or where session IDs collide across sources.
+// =============================================================================
+
+/// P7.4: Verify that re-indexing the same conversation updates it (doesn't duplicate)
+#[test]
+fn resync_same_conversation_updates_not_duplicates() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let db_path = data_dir.join("resync.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+
+    let index_dir = data_dir.join("index");
+    std::fs::create_dir_all(&index_dir).unwrap();
+    let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
+
+    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::remote("laptop", "user@laptop.local"))
+        .expect("remote source");
+
+    let now = 1700000000i64;
+
+    // First sync from laptop
+    let conv_v1 = norm_conv_with_provenance(
+        "conv-abc123",
+        "laptop",
+        Some("user@laptop.local"),
+        now,
+        vec![
+            norm_msg(0, now, "First message from laptop"),
+            norm_msg(1, now + 100, "Second message"),
+        ],
+    );
+    persist::persist_conversation(&mut storage, &mut t_index, &conv_v1).unwrap();
+    t_index.commit().unwrap();
+
+    let count_after_first: i64 = storage
+        .raw()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count_after_first, 1, "should have 1 conversation after first sync");
+
+    // Second sync (same conversation, simulating re-sync with updated content)
+    let conv_v2 = norm_conv_with_provenance(
+        "conv-abc123",
+        "laptop",
+        Some("user@laptop.local"),
+        now,
+        vec![
+            norm_msg(0, now, "First message from laptop"),
+            norm_msg(1, now + 100, "Second message"),
+            norm_msg(2, now + 200, "Third message (new)"),
+        ],
+    );
+    persist::persist_conversation(&mut storage, &mut t_index, &conv_v2).unwrap();
+    t_index.commit().unwrap();
+
+    let count_after_second: i64 = storage
+        .raw()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count_after_second, 1,
+        "should still have 1 conversation after re-sync (not duplicated)"
+    );
+
+    // Verify messages were appended
+    let msg_count: i64 = storage
+        .raw()
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(msg_count, 3, "should have 3 messages after update");
+}
+
+/// P7.4: Verify that same external_id from different sources creates distinct entries
+#[test]
+fn same_id_different_sources_are_distinct() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("collision.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+
+    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::remote("laptop", "user@laptop.local"))
+        .expect("laptop source");
+    storage
+        .upsert_source(&Source::remote("server", "admin@server.local"))
+        .expect("server source");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+
+    let now = 1700000000i64;
+
+    // Same external_id "session-001" from three different sources
+    // This could happen with sequential IDs or if different machines happen to generate same UUID
+    storage.insert_conversation_tree(agent_id, None,
+        &conv_with_source("session-001", "local", None, now,
+            vec![msg(0, now, "Local version of session")])).unwrap();
+
+    storage.insert_conversation_tree(agent_id, None,
+        &conv_with_source("session-001", "laptop", Some("user@laptop.local"), now + 1000,
+            vec![msg(0, now + 1000, "Laptop version of session")])).unwrap();
+
+    storage.insert_conversation_tree(agent_id, None,
+        &conv_with_source("session-001", "server", Some("admin@server.local"), now + 2000,
+            vec![msg(0, now + 2000, "Server version of session")])).unwrap();
+
+    // Should have THREE entries (distinguished by source_id)
+    let total: i64 = storage
+        .raw()
+        .query_row(
+            "SELECT COUNT(*) FROM conversations WHERE external_id = 'session-001'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, 3, "should have 3 conversations with same external_id");
+
+    // Verify each source has one entry
+    let by_source: Vec<(String, i64)> = storage
+        .raw()
+        .prepare(
+            "SELECT source_id, COUNT(*) FROM conversations
+             WHERE external_id = 'session-001'
+             GROUP BY source_id
+             ORDER BY source_id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(by_source.len(), 3, "should have 3 sources");
+    for (source_id, count) in by_source {
+        assert_eq!(count, 1, "source {} should have exactly 1 entry", source_id);
+    }
+}
+
+/// P7.4: Verify deduplication works within the same source
+#[test]
+fn dedup_within_source_not_across() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let db_path = data_dir.join("dedup.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+
+    let index_dir = data_dir.join("index");
+    std::fs::create_dir_all(&index_dir).unwrap();
+    let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
+
+    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::remote("laptop", "user@laptop.local"))
+        .expect("remote source");
+
+    let now = 1700000000i64;
+
+    // Create 3 conversations from laptop
+    for i in 0..3 {
+        let conv = norm_conv_with_provenance(
+            &format!("laptop-conv-{}", i),
+            "laptop",
+            Some("user@laptop.local"),
+            now + i * 1000,
+            vec![norm_msg(0, now + i * 1000, &format!("Laptop message {}", i))],
+        );
+        persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
+    }
+    t_index.commit().unwrap();
+
+    let initial_count: i64 = storage
+        .raw()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(initial_count, 3, "should have 3 conversations initially");
+
+    // Re-sync same 3 conversations (simulating re-indexing)
+    for i in 0..3 {
+        let conv = norm_conv_with_provenance(
+            &format!("laptop-conv-{}", i),
+            "laptop",
+            Some("user@laptop.local"),
+            now + i * 1000,
+            vec![norm_msg(0, now + i * 1000, &format!("Laptop message {}", i))],
+        );
+        persist::persist_conversation(&mut storage, &mut t_index, &conv).unwrap();
+    }
+    t_index.commit().unwrap();
+
+    // Should still have same count (deduplicated within source)
+    let final_count: i64 = storage
+        .raw()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        final_count, initial_count,
+        "count should remain same after re-sync (deduplicated)"
+    );
+}
+
+/// P7.4: Verify composite key (source_id, agent_id, external_id) is unique constraint
+#[test]
+fn composite_key_unique_constraint() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("unique.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+
+    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::remote("laptop", "user@laptop.local"))
+        .expect("remote source");
+
+    let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
+
+    let now = 1700000000i64;
+
+    // Insert first conversation
+    storage.insert_conversation_tree(agent_id, None,
+        &conv_with_source("unique-test", "local", None, now,
+            vec![msg(0, now, "First message")])).unwrap();
+
+    // Insert same external_id from different source - should succeed
+    storage.insert_conversation_tree(agent_id, None,
+        &conv_with_source("unique-test", "laptop", Some("user@laptop.local"), now + 1000,
+            vec![msg(0, now + 1000, "Laptop message")])).unwrap();
+
+    // Verify both exist
+    let count: i64 = storage
+        .raw()
+        .query_row(
+            "SELECT COUNT(*) FROM conversations WHERE external_id = 'unique-test'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2, "should have 2 conversations with same external_id from different sources");
+
+    // Verify composite uniqueness via SQL
+    let unique_pairs: Vec<(String, String, String)> = storage
+        .raw()
+        .prepare(
+            "SELECT source_id, agent_id, external_id FROM conversations
+             WHERE external_id = 'unique-test'
+             ORDER BY source_id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?.to_string(),
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(unique_pairs.len(), 2);
+    // Local and laptop should both have unique-test
+    assert!(unique_pairs.iter().any(|(s, _, _)| s == "local"));
+    assert!(unique_pairs.iter().any(|(s, _, _)| s == "laptop"));
+}
+
+/// P7.4: Verify updating conversation from same source preserves ended_at
+#[test]
+fn update_conversation_preserves_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    let db_path = data_dir.join("metadata.db");
+    let mut storage = SqliteStorage::open(&db_path).expect("open db");
+
+    let index_dir = data_dir.join("index");
+    std::fs::create_dir_all(&index_dir).unwrap();
+    let mut t_index = TantivyIndex::open_or_create(&index_dir).expect("create index");
+
+    storage.upsert_source(&Source::local()).expect("local source");
+    storage
+        .upsert_source(&Source::remote("laptop", "user@laptop.local"))
+        .expect("remote source");
+
+    let now = 1700000000i64;
+
+    // First version with 2 messages
+    let conv_v1 = norm_conv_with_provenance(
+        "meta-test",
+        "laptop",
+        Some("user@laptop.local"),
+        now,
+        vec![
+            norm_msg(0, now, "Message 1"),
+            norm_msg(1, now + 100, "Message 2"),
+        ],
+    );
+    persist::persist_conversation(&mut storage, &mut t_index, &conv_v1).unwrap();
+    t_index.commit().unwrap();
+
+    // Get initial ended_at
+    let initial_ended_at: i64 = storage
+        .raw()
+        .query_row(
+            "SELECT ended_at FROM conversations WHERE external_id = 'meta-test'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(initial_ended_at, now + 100, "ended_at should be time of last message");
+
+    // Update with new message
+    let conv_v2 = norm_conv_with_provenance(
+        "meta-test",
+        "laptop",
+        Some("user@laptop.local"),
+        now,
+        vec![
+            norm_msg(0, now, "Message 1"),
+            norm_msg(1, now + 100, "Message 2"),
+            norm_msg(2, now + 200, "Message 3 (new)"),
+        ],
+    );
+    persist::persist_conversation(&mut storage, &mut t_index, &conv_v2).unwrap();
+    t_index.commit().unwrap();
+
+    // Verify ended_at was updated
+    let final_ended_at: i64 = storage
+        .raw()
+        .query_row(
+            "SELECT ended_at FROM conversations WHERE external_id = 'meta-test'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        final_ended_at,
+        now + 200,
+        "ended_at should be updated to time of new last message"
+    );
+
+    // Verify provenance is still correct
+    let (source_id, origin_host): (String, Option<String>) = storage
+        .raw()
+        .query_row(
+            "SELECT source_id, origin_host FROM conversations WHERE external_id = 'meta-test'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(source_id, "laptop");
+    assert_eq!(origin_host.as_deref(), Some("user@laptop.local"));
+}
