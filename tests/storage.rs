@@ -27,6 +27,8 @@ fn sample_conv(external_id: Option<&str>, messages: Vec<Message>) -> Conversatio
         approx_tokens: Some(42),
         metadata_json: serde_json::json!({"k": "v"}),
         messages,
+        source_id: "local".to_string(),
+        origin_host: None,
     }
 }
 
@@ -49,7 +51,7 @@ fn schema_version_created_on_open() {
     let db_path = tmp.path().join("store.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
 
-    assert_eq!(storage.schema_version().unwrap(), 4);
+    assert_eq!(storage.schema_version().unwrap(), 5);
 
     // If meta row is removed, the getter surfaces an error.
     storage.raw().execute("DELETE FROM meta", []).unwrap();
@@ -560,7 +562,7 @@ fn migration_from_v1_applies_v2_and_v3() {
     let storage = SqliteStorage::open(&db_path).expect("open v1 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 4, "should migrate to v4");
+    assert_eq!(storage.schema_version().unwrap(), 5, "should migrate to v5");
 
     // Verify FTS5 table was created
     let tables: Vec<String> = storage
@@ -676,7 +678,7 @@ fn migration_from_v2_applies_v3() {
     let storage = SqliteStorage::open(&db_path).expect("open v2 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 4, "should migrate to v4");
+    assert_eq!(storage.schema_version().unwrap(), 5, "should migrate to v5");
 }
 
 #[test]
@@ -1037,7 +1039,7 @@ fn migration_from_v3_creates_sources_table() {
     let storage = SqliteStorage::open(&db_path).expect("open v3 db");
 
     // Verify migration completed
-    assert_eq!(storage.schema_version().unwrap(), 4, "should migrate to v4");
+    assert_eq!(storage.schema_version().unwrap(), 5, "should migrate to v5");
 
     // Verify sources table was created with local source
     let sources = storage.list_sources().expect("list_sources");

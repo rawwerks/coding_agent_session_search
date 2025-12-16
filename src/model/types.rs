@@ -49,6 +49,17 @@ pub struct Conversation {
     pub approx_tokens: Option<i64>,
     pub metadata_json: serde_json::Value,
     pub messages: Vec<Message>,
+    /// Source ID for provenance tracking (e.g., "local", "work-laptop").
+    /// Defaults to "local" for backward compatibility.
+    #[serde(default = "default_source_id")]
+    pub source_id: String,
+    /// Origin host label for remote sources.
+    #[serde(default)]
+    pub origin_host: Option<String>,
+}
+
+fn default_source_id() -> String {
+    "local".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

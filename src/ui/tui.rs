@@ -6542,6 +6542,8 @@ mod tests {
             approx_tokens: None,
             metadata_json: json!({}),
             messages: Vec::new(),
+            source_id: "local".to_string(),
+            origin_host: None,
         };
 
         let message = Message {

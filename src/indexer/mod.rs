@@ -651,6 +651,8 @@ pub mod persist {
                         .collect(),
                 })
                 .collect(),
+            source_id: "local".to_string(),
+            origin_host: None,
         }
     }
 
@@ -788,6 +790,8 @@ mod tests {
                             snippets: Vec::new(),
                         })
                         .collect(),
+                    source_id: "local".to_string(),
+                    origin_host: None,
                 },
             )
             .unwrap();
@@ -805,7 +809,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(msg_count, 0);
-        assert_eq!(storage.schema_version().unwrap(), 4);
+        assert_eq!(storage.schema_version().unwrap(), 5);
     }
 
     #[test]

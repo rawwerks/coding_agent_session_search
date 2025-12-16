@@ -349,6 +349,8 @@ impl ConversationFixtureBuilder {
             approx_tokens: Some((self.message_count * 12) as i64),
             metadata_json: json!({"fixture": true}),
             messages,
+            source_id: "local".to_string(),
+            origin_host: None,
         }
     }
 }

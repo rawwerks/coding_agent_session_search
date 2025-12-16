@@ -27,7 +27,8 @@ pub fn load_conversation(
     source_path: &str,
 ) -> Result<Option<ConversationView>> {
     let mut stmt = storage.raw().prepare(
-        "SELECT c.id, a.slug, w.id, w.path, w.display_name, c.external_id, c.title, c.source_path, c.started_at, c.ended_at, c.approx_tokens, c.metadata_json
+        "SELECT c.id, a.slug, w.id, w.path, w.display_name, c.external_id, c.title, c.source_path,
+                c.started_at, c.ended_at, c.approx_tokens, c.metadata_json, c.source_id, c.origin_host
          FROM conversations c
          JOIN agents a ON c.agent_id = a.id
          LEFT JOIN workspaces w ON c.workspace_id = w.id
@@ -54,6 +55,10 @@ pub fn load_conversation(
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default(),
             messages: Vec::new(),
+            source_id: row
+                .get::<_, String>(12)
+                .unwrap_or_else(|_| "local".to_string()),
+            origin_host: row.get(13)?,
         };
         let workspace = row.get::<_, Option<i64>>(2)?.map(|id| Workspace {
             id: Some(id),

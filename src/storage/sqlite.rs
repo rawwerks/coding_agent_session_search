@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const MIGRATION_V1: &str = r"
 PRAGMA foreign_keys = ON;
@@ -162,6 +162,49 @@ INSERT OR IGNORE INTO sources (id, kind, host_label, created_at, updated_at)
 VALUES ('local', 'local', NULL, strftime('%s','now')*1000, strftime('%s','now')*1000);
 ";
 
+const MIGRATION_V5: &str = r"
+-- Add provenance columns to conversations table
+-- SQLite cannot alter unique constraints, so we need to recreate the table
+
+-- Temporarily disable foreign keys for table rewrite
+PRAGMA foreign_keys = OFF;
+
+-- Create new table with provenance columns and updated unique constraint
+CREATE TABLE conversations_new (
+    id INTEGER PRIMARY KEY,
+    agent_id INTEGER NOT NULL REFERENCES agents(id),
+    workspace_id INTEGER REFERENCES workspaces(id),
+    source_id TEXT NOT NULL DEFAULT 'local' REFERENCES sources(id),
+    external_id TEXT,
+    title TEXT,
+    source_path TEXT NOT NULL,
+    started_at INTEGER,
+    ended_at INTEGER,
+    approx_tokens INTEGER,
+    metadata_json TEXT,
+    origin_host TEXT,
+    UNIQUE(source_id, agent_id, external_id)
+);
+
+-- Copy data from old table (all existing conversations get source_id='local')
+INSERT INTO conversations_new (id, agent_id, workspace_id, source_id, external_id, title,
+                               source_path, started_at, ended_at, approx_tokens, metadata_json, origin_host)
+SELECT id, agent_id, workspace_id, 'local', external_id, title,
+       source_path, started_at, ended_at, approx_tokens, metadata_json, NULL
+FROM conversations;
+
+-- Drop old table and rename new
+DROP TABLE conversations;
+ALTER TABLE conversations_new RENAME TO conversations;
+
+-- Recreate indexes
+CREATE INDEX IF NOT EXISTS idx_conversations_agent_started ON conversations(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_source_id ON conversations(source_id);
+
+-- Re-enable foreign keys
+PRAGMA foreign_keys = ON;
+";
+
 pub struct SqliteStorage {
     conn: Connection,
 }
@@ -262,12 +305,13 @@ impl SqliteStorage {
         workspace_id: Option<i64>,
         conv: &Conversation,
     ) -> Result<InsertOutcome> {
+        // Check for existing conversation with same (source_id, agent_id, external_id)
         if let Some(ext) = &conv.external_id
             && let Some(existing) = self
                 .conn
                 .query_row(
-                    "SELECT id FROM conversations WHERE agent_id = ? AND external_id = ?",
-                    params![agent_id, ext],
+                    "SELECT id FROM conversations WHERE source_id = ? AND agent_id = ? AND external_id = ?",
+                    params![&conv.source_id, agent_id, ext],
                     |row| row.get(0),
                 )
                 .optional()?
@@ -377,7 +421,8 @@ impl SqliteStorage {
     pub fn list_conversations(&self, limit: i64, offset: i64) -> Result<Vec<Conversation>> {
         let mut stmt = self.conn.prepare(
             r"SELECT c.id, a.slug, w.path, c.external_id, c.title, c.source_path,
-                       c.started_at, c.ended_at, c.approx_tokens, c.metadata_json
+                       c.started_at, c.ended_at, c.approx_tokens, c.metadata_json,
+                       c.source_id, c.origin_host
                 FROM conversations c
                 JOIN agents a ON c.agent_id = a.id
                 LEFT JOIN workspaces w ON c.workspace_id = w.id
@@ -403,6 +448,10 @@ impl SqliteStorage {
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default(),
                 messages: Vec::new(),
+                source_id: row
+                    .get::<_, String>(10)
+                    .unwrap_or_else(|_| "local".to_string()),
+                origin_host: row.get(11)?,
             })
         })?;
         let mut out = Vec::new();
@@ -673,18 +722,25 @@ fn migrate(conn: &mut Connection) -> Result<()> {
             tx.execute_batch(MIGRATION_V2)?;
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
+            tx.execute_batch(MIGRATION_V5)?;
         }
         1 => {
             tx.execute_batch(MIGRATION_V2)?;
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
+            tx.execute_batch(MIGRATION_V5)?;
         }
         2 => {
             tx.execute_batch(MIGRATION_V3)?;
             tx.execute_batch(MIGRATION_V4)?;
+            tx.execute_batch(MIGRATION_V5)?;
         }
         3 => {
             tx.execute_batch(MIGRATION_V4)?;
+            tx.execute_batch(MIGRATION_V5)?;
+        }
+        4 => {
+            tx.execute_batch(MIGRATION_V5)?;
         }
         v => return Err(anyhow!("unsupported schema version {v}")),
     }
@@ -706,18 +762,21 @@ fn insert_conversation(
 ) -> Result<i64> {
     tx.execute(
         "INSERT INTO conversations(
-            agent_id, workspace_id, external_id, title, source_path, started_at, ended_at, approx_tokens, metadata_json
-        ) VALUES(?,?,?,?,?,?,?,?,?)",
+            agent_id, workspace_id, source_id, external_id, title, source_path,
+            started_at, ended_at, approx_tokens, metadata_json, origin_host
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         params![
             agent_id,
             workspace_id,
+            &conv.source_id,
             conv.external_id,
             conv.title,
             path_to_string(&conv.source_path),
             conv.started_at,
             conv.ended_at,
             conv.approx_tokens,
-            serde_json::to_string(&conv.metadata_json)?
+            serde_json::to_string(&conv.metadata_json)?,
+            conv.origin_host
         ],
     )?;
     Ok(tx.last_insert_rowid())
