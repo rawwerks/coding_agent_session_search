@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "coding-agent-search"
-version = "0.1.35"
+version = "0.1.36"
 dependencies = [
  "aes-gcm",
  "anyhow",

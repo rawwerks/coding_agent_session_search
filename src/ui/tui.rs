@@ -866,9 +866,10 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
         &[
             "Index & state: ~/.local/share/coding-agent-search/".to_string(),
             "  agent_search.db - Full-text search index".to_string(),
-            "  tui_state.json - Persisted UI preferences".to_string(),
-            "  update_state.json - Update check state".to_string(),
-            "Agent histories auto-detected from: Claude, Codex, Gemini, Copilot, Cursor"
+            "  tui_state.json - UI preferences | watch_state.json - Watch timestamps".to_string(),
+            "  remotes/ - Synced session data from remote sources".to_string(),
+            "Config: ~/.config/cass/sources.toml (remote sources)".to_string(),
+            "Agents: Claude, Codex, Gemini, Cline, OpenCode, Amp, Cursor, ChatGPT, Aider, Pi-Agent"
                 .to_string(),
         ],
     ));
@@ -906,8 +907,17 @@ pub fn help_lines(palette: ThemePalette) -> Vec<Line<'static>> {
                 shortcuts::FILTER_AGENT, shortcuts::FILTER_WORKSPACE, shortcuts::FILTER_DATE_FROM, shortcuts::FILTER_DATE_TO, shortcuts::CLEAR_FILTERS),
             format!("{} scope to active agent | {} clear scope | {} cycle time presets (24h/7d/30d/all)",
                 shortcuts::SCOPE_AGENT, shortcuts::SCOPE_WORKSPACE, shortcuts::CYCLE_TIME_PRESETS),
-            "F11 cycle source filter (all → local → remote) | Shift+F11 source filter menu".to_string(),
             "Chips in search bar; Backspace removes last; Enter (query empty) edits last chip".to_string(),
+        ],
+    ));
+    lines.extend(add_section(
+        "Sources (Multi-Machine)",
+        &[
+            "F11 cycle source filter: all → local → remote → all".to_string(),
+            "Shift+F11 opens source filter menu (select specific sources)".to_string(),
+            "Remote sessions show [source-name] in results list".to_string(),
+            "CLI: cass sources add|list|doctor|sync|mappings".to_string(),
+            "Config: ~/.config/cass/sources.toml".to_string(),
         ],
     ));
     lines.extend(add_section(

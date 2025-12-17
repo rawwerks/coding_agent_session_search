@@ -122,6 +122,130 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 - **Aider**: `~/.aider.chat.history.md` and per-project `.aider.chat.history.md` files (Markdown)
 - **Pi-Agent**: `~/.pi/agent/sessions` (Session JSONL with thinking content)
 
+### 🌐 Remote Sources (Multi-Machine Search)
+
+Search across agent sessions from multiple machines—your laptop, desktop, and remote servers—all from a single unified index. `cass` uses SSH/rsync to efficiently sync session data, tracking provenance so you know where each conversation originated.
+
+#### Quick Setup
+
+```bash
+# Add a remote machine using platform presets
+cass sources add user@laptop.local --preset macos-defaults
+
+# Or specify paths explicitly
+cass sources add dev@workstation --path ~/.claude/projects --path ~/.codex/sessions
+
+# Sync sessions from all configured sources
+cass sources sync
+
+# Check source health and connectivity
+cass sources doctor
+```
+
+#### Configuration File
+
+Sources are configured in `~/.config/cass/sources.toml`:
+
+```toml
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects", "~/.codex/sessions"]
+sync_schedule = "manual"
+
+[[sources]]
+name = "workstation"
+type = "ssh"
+host = "dev@work.example.com"
+paths = ["~/.claude/projects"]
+sync_schedule = "daily"
+
+# Path mappings rewrite remote paths to local equivalents
+[[sources.path_mappings]]
+from = "/home/dev/projects"
+to = "/Users/me/projects"
+
+# Agent-specific mappings
+[[sources.path_mappings]]
+from = "/opt/work"
+to = "/Volumes/Work"
+agents = ["claude_code"]
+```
+
+**Configuration Fields:**
+| Field | Description |
+|-------|-------------|
+| `name` | Friendly identifier (becomes `source_id`) |
+| `type` | Connection type: `ssh` or `local` |
+| `host` | SSH host (`user@hostname`) |
+| `paths` | Paths to sync (supports `~` expansion) |
+| `sync_schedule` | `manual`, `hourly`, or `daily` |
+| `path_mappings` | Rewrite remote paths to local equivalents |
+
+#### CLI Commands
+
+```bash
+# List configured sources
+cass sources list [--verbose] [--json]
+
+# Add a new source
+cass sources add <user@host> [--name <name>] [--preset macos-defaults|linux-defaults] [--path <path>...] [--no-test]
+
+# Remove a source
+cass sources remove <name> [--purge] [-y]
+
+# Check connectivity and config
+cass sources doctor [--source <name>] [--json]
+
+# Sync sessions
+cass sources sync [--source <name>] [--no-index] [--verbose] [--dry-run] [--json]
+```
+
+#### Path Mappings
+
+When viewing sessions from remote machines, workspace paths may not exist locally. Path mappings rewrite these paths so file links work on your local machine:
+
+```bash
+# List current mappings
+cass sources mappings list laptop
+
+# Add a mapping
+cass sources mappings add laptop --from /home/user/projects --to /Users/me/projects
+
+# Test how a path would be rewritten
+cass sources mappings test laptop /home/user/projects/myapp/src/main.rs
+# Output: /Users/me/projects/myapp/src/main.rs
+
+# Agent-specific mappings (only apply for certain agents)
+cass sources mappings add laptop --from /opt/work --to /Volumes/Work --agents claude_code,codex
+
+# Remove a mapping by index
+cass sources mappings remove laptop 0
+```
+
+#### TUI Source Filtering
+
+In the TUI, filter sessions by origin:
+- **F11**: Cycle source filter (all → local → remote → all)
+- **Shift+F11**: Open source filter menu to select specific sources
+
+Remote sessions display with a source indicator (e.g., `[laptop]`) in the results list.
+
+#### Provenance Tracking
+
+Each conversation tracks its origin:
+- `source_id`: Machine identifier (e.g., "laptop", "workstation")
+- `source_kind`: `local` or `remote`
+- `workspace_original`: Original path on the remote machine (before path mapping)
+
+These fields appear in JSON/robot output and enable filtering:
+```bash
+cass search "auth error" --source laptop --json
+cass timeline --days 7 --source remote
+cass stats --by-source
+```
+
 ## 🤖 AI / Automation Mode
 
 `cass` is purpose-built for consumption by AI coding agents—not just as an afterthought, but as a first-class design goal. When you're an AI agent working on a codebase, your own session history and those of other agents become an invaluable knowledge base: solutions to similar problems, context about design decisions, debugging approaches that worked, and institutional memory that would otherwise be lost.
