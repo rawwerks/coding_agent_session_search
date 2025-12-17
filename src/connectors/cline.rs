@@ -218,3 +218,614 @@ impl Connector for ClineConnector {
         Ok(convs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =====================================================
+    // Constructor Tests
+    // =====================================================
+
+    #[test]
+    fn new_creates_connector() {
+        let connector = ClineConnector::new();
+        let _ = connector;
+    }
+
+    #[test]
+    fn default_creates_connector() {
+        let connector = ClineConnector::default();
+        let _ = connector;
+    }
+
+    // =====================================================
+    // Helper: Create Cline storage structure
+    // =====================================================
+
+    fn create_cline_storage(dir: &TempDir) -> PathBuf {
+        let storage = dir.path().join("claude-dev");
+        fs::create_dir_all(&storage).unwrap();
+        storage
+    }
+
+    fn create_task_dir(storage: &PathBuf, task_id: &str) -> PathBuf {
+        let task_dir = storage.join(task_id);
+        fs::create_dir_all(&task_dir).unwrap();
+        task_dir
+    }
+
+    // =====================================================
+    // scan() Tests with ui_messages.json
+    // =====================================================
+
+    #[test]
+    fn scan_parses_ui_messages_simple() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-001");
+
+        let messages = json!([
+            {"role": "user", "content": "Hello Cline!", "timestamp": 1733000000},
+            {"role": "assistant", "content": "Hello! How can I help?", "timestamp": 1733000001}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Hello Cline!");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_prefers_ui_messages_over_api_history() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-prefer");
+
+        // Both files exist
+        let ui = json!([{"role": "user", "content": "From UI"}]);
+        let api = json!([{"role": "user", "content": "From API"}]);
+        fs::write(task_dir.join("ui_messages.json"), ui.to_string()).unwrap();
+        fs::write(
+            task_dir.join("api_conversation_history.json"),
+            api.to_string(),
+        )
+        .unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].content, "From UI");
+    }
+
+    #[test]
+    fn scan_falls_back_to_api_history() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-api");
+
+        // Only API history exists
+        let api = json!([{"role": "user", "content": "From API history"}]);
+        fs::write(
+            task_dir.join("api_conversation_history.json"),
+            api.to_string(),
+        )
+        .unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].content, "From API history");
+    }
+
+    // =====================================================
+    // scan() Tests with task_metadata.json
+    // =====================================================
+
+    #[test]
+    fn scan_extracts_title_from_metadata() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-meta");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        let metadata = json!({"title": "My Cline Task"});
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        fs::write(task_dir.join("task_metadata.json"), metadata.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("My Cline Task".to_string()));
+    }
+
+    #[test]
+    fn scan_extracts_workspace_from_root_path() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-ws");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        let metadata = json!({"rootPath": "/home/user/project"});
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        fs::write(task_dir.join("task_metadata.json"), metadata.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/project"))
+        );
+    }
+
+    #[test]
+    fn scan_extracts_workspace_from_cwd() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-cwd");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        let metadata = json!({"cwd": "/home/user/cwd-project"});
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        fs::write(task_dir.join("task_metadata.json"), metadata.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs[0].workspace,
+            Some(PathBuf::from("/home/user/cwd-project"))
+        );
+    }
+
+    #[test]
+    fn scan_extracts_workspace_from_workspace_key() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-ws-key");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        let metadata = json!({"workspace": "/home/user/ws"});
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        fs::write(task_dir.join("task_metadata.json"), metadata.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].workspace, Some(PathBuf::from("/home/user/ws")));
+    }
+
+    // =====================================================
+    // Message Parsing Tests
+    // =====================================================
+
+    #[test]
+    fn scan_parses_role_from_type_field() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-type");
+
+        let messages = json!([{"type": "userMessage", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].role, "userMessage");
+    }
+
+    #[test]
+    fn scan_parses_content_from_text_field() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-text");
+
+        let messages = json!([{"role": "user", "text": "Content from text field"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].content, "Content from text field");
+    }
+
+    #[test]
+    fn scan_parses_content_from_message_field() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-msg");
+
+        let messages = json!([{"role": "user", "message": "Content from message field"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].content, "Content from message field");
+    }
+
+    #[test]
+    fn scan_parses_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-ts");
+
+        let messages = json!([{"role": "user", "content": "Test", "timestamp": 1733000000}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000000));
+    }
+
+    #[test]
+    fn scan_parses_created_at() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-created");
+
+        let messages = json!([{"role": "user", "content": "Test", "created_at": 1733000001}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000001));
+    }
+
+    #[test]
+    fn scan_parses_ts() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-ts-field");
+
+        let messages = json!([{"role": "user", "content": "Test", "ts": 1733000002}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000002));
+    }
+
+    #[test]
+    fn scan_skips_empty_content() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-empty");
+
+        let messages = json!([
+            {"role": "user", "content": "Valid"},
+            {"role": "assistant", "content": ""},
+            {"role": "assistant", "content": "   "}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn scan_sorts_messages_by_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-sort");
+
+        // Messages out of order
+        let messages = json!([
+            {"role": "assistant", "content": "Later", "timestamp": 1733000100},
+            {"role": "user", "content": "Earlier", "timestamp": 1733000000}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].content, "Earlier");
+        assert_eq!(convs[0].messages[1].content, "Later");
+    }
+
+    #[test]
+    fn scan_assigns_sequential_indices() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-idx");
+
+        let messages = json!([
+            {"role": "user", "content": "First", "timestamp": 1},
+            {"role": "assistant", "content": "Second", "timestamp": 2},
+            {"role": "user", "content": "Third", "timestamp": 3}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].idx, 0);
+        assert_eq!(convs[0].messages[1].idx, 1);
+        assert_eq!(convs[0].messages[2].idx, 2);
+    }
+
+    #[test]
+    fn scan_defaults_role_to_agent() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-no-role");
+
+        let messages = json!([{"content": "No role field"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].role, "agent");
+    }
+
+    // =====================================================
+    // Title Extraction Tests
+    // =====================================================
+
+    #[test]
+    fn scan_extracts_title_from_first_message_if_no_metadata() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-no-meta");
+
+        let messages = json!([
+            {"role": "user", "content": "First line\nSecond line"},
+            {"role": "assistant", "content": "Response"}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("First line".to_string()));
+    }
+
+    #[test]
+    fn scan_truncates_long_titles() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-long-title");
+
+        let long_content = "x".repeat(200);
+        let messages = json!([{"role": "user", "content": long_content}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title.as_ref().unwrap().len(), 100);
+    }
+
+    // =====================================================
+    // External ID and Agent Slug Tests
+    // =====================================================
+
+    #[test]
+    fn scan_uses_task_dir_name_as_external_id() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "unique-task-id-123");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].external_id, Some("unique-task-id-123".to_string()));
+    }
+
+    #[test]
+    fn scan_sets_agent_slug_to_cline() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-slug");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].agent_slug, "cline");
+    }
+
+    // =====================================================
+    // Timestamp Tests
+    // =====================================================
+
+    #[test]
+    fn scan_sets_started_at_from_first_message() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-start");
+
+        let messages = json!([
+            {"role": "user", "content": "First", "timestamp": 1733000000},
+            {"role": "assistant", "content": "Last", "timestamp": 1733000100}
+        ]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].started_at, Some(1733000000));
+        assert_eq!(convs[0].ended_at, Some(1733000100));
+    }
+
+    // =====================================================
+    // Edge Cases
+    // =====================================================
+
+    #[test]
+    fn scan_handles_empty_storage() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_task_history_json() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+
+        // This is a file, not a dir, but the code checks for dir name
+        let task_history_dir = storage.join("taskHistory.json");
+        fs::create_dir_all(&task_history_dir).unwrap();
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_history_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should be skipped
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_dir_without_message_files() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-no-files");
+        // Don't create any message files
+
+        // Create metadata only
+        let metadata = json!({"title": "No messages"});
+        fs::write(task_dir.join("task_metadata.json"), metadata.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_invalid_json() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-invalid");
+
+        fs::write(task_dir.join("ui_messages.json"), "not valid json").unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_skips_empty_messages_array() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-empty-arr");
+
+        let messages = json!([]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn scan_handles_multiple_tasks() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+
+        for i in 1..=3 {
+            let task_dir = create_task_dir(&storage, &format!("task-{i}"));
+            let messages = json!([{"role": "user", "content": format!("Task {i}")}]);
+            fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+        }
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 3);
+    }
+
+    #[test]
+    fn scan_skips_non_directory_entries() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+
+        // Create a file instead of directory
+        fs::write(storage.join("not-a-dir.json"), "{}").unwrap();
+
+        // Create a real task
+        let task_dir = create_task_dir(&storage, "real-task");
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Only the real task should be processed
+        assert_eq!(convs.len(), 1);
+    }
+
+    #[test]
+    fn scan_sets_metadata_source() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_cline_storage(&dir);
+        let task_dir = create_task_dir(&storage, "task-meta-src");
+
+        let messages = json!([{"role": "user", "content": "Test"}]);
+        fs::write(task_dir.join("ui_messages.json"), messages.to_string()).unwrap();
+
+        let connector = ClineConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].metadata["source"], "cline");
+    }
+}
