@@ -1136,8 +1136,8 @@ mod tests {
         let prev = std::env::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
-        // Use dirs::data_dir() to align with connector detection roots.
-        let data_dir = dirs::data_dir().unwrap().join("amp");
+        // Use xdg directly (not dirs::data_dir() which doesn't respect XDG_DATA_HOME on macOS)
+        let data_dir = xdg.join("amp");
         std::fs::create_dir_all(&data_dir).unwrap();
 
         // Prepare amp fixture under data dir so detection + scan succeed.
@@ -1241,8 +1241,9 @@ CREATE VIRTUAL TABLE fts_messages USING fts5(
         let prev = std::env::var("XDG_DATA_HOME").ok();
         unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
 
-        // Prepare amp fixture
-        let data_dir = dirs::data_dir().unwrap().join("amp");
+        // Prepare amp fixture using temp directory directly (not dirs::data_dir()
+        // which doesn't respect XDG_DATA_HOME on macOS)
+        let data_dir = xdg.join("amp");
         std::fs::create_dir_all(&data_dir).unwrap();
         let amp_dir = data_dir.join("amp");
         std::fs::create_dir_all(&amp_dir).unwrap();
