@@ -44,7 +44,8 @@ pub mod colors {
     pub const TEXT_SECONDARY: Color = Color::Rgb(169, 177, 214); // #a9b1d6
 
     /// Muted text - hints, placeholders, timestamps
-    pub const TEXT_MUTED: Color = Color::Rgb(86, 95, 137); // #565f89 (original Tokyo Night)
+    /// Lightened from original Tokyo Night #565f89 to meet WCAG AA-large (3:1) contrast
+    pub const TEXT_MUTED: Color = Color::Rgb(105, 114, 158); // #696e9e (WCAG AA-large compliant)
 
     /// Disabled/inactive text
     pub const TEXT_DISABLED: Color = Color::Rgb(68, 75, 106); // #444b6a
@@ -844,7 +845,7 @@ impl ThemePalette {
             bg: Color::Rgb(40, 42, 54),            // Background
             fg: Color::Rgb(248, 248, 242),         // Foreground
             surface: Color::Rgb(68, 71, 90),       // Current Line
-            hint: Color::Rgb(98, 114, 164),        // Comment (#6272a4 - original Dracula)
+            hint: Color::Rgb(155, 165, 200),        // Lightened from Dracula comment for WCAG AA-large on surface
             border: Color::Rgb(68, 71, 90),        // Current Line
             user: Color::Rgb(80, 250, 123),        // Green
             agent: Color::Rgb(189, 147, 249),      // Purple
@@ -865,7 +866,7 @@ impl ThemePalette {
             bg: Color::Rgb(46, 52, 64),        // Nord0 (polar night)
             fg: Color::Rgb(236, 239, 244),     // Nord6 (snow storm)
             surface: Color::Rgb(59, 66, 82),   // Nord1
-            hint: Color::Rgb(76, 86, 106),     // Nord3 (#4c566a - original Nord)
+            hint: Color::Rgb(145, 155, 180),    // Lightened from Nord3 for WCAG AA-large on surface
             border: Color::Rgb(67, 76, 94),    // Nord2
             user: Color::Rgb(163, 190, 140),   // Nord14 (aurora green)
             agent: Color::Rgb(136, 192, 208),  // Nord8 (frost cyan)

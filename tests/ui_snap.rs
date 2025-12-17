@@ -794,3 +794,226 @@ fn role_colors_are_wcag_readable() {
         }
     }
 }
+
+// ============================================================
+// 422.1: Comprehensive WCAG Pane Contrast Tests
+// ============================================================
+
+#[test]
+fn agent_pane_text_meets_wcag_aa() {
+    // Test all agent pane backgrounds have sufficient contrast with primary text
+    let agents = [
+        "claude_code",
+        "claude",
+        "codex",
+        "cline",
+        "gemini",
+        "gemini_cli",
+        "amp",
+        "aider",
+        "cursor",
+        "chatgpt",
+        "opencode",
+        "pi_agent",
+        "unknown",
+    ];
+
+    for agent in agents {
+        let pane = ThemePalette::agent_pane(agent);
+        let level = check_contrast(pane.fg, pane.bg);
+        assert!(
+            level.meets(ContrastLevel::AA),
+            "Agent '{}' pane: text (fg) should meet WCAG AA against bg, got {:?} (ratio: {:.2}:1)",
+            agent,
+            level,
+            contrast_ratio(pane.fg, pane.bg)
+        );
+    }
+}
+
+#[test]
+fn agent_pane_accent_meets_wcag_aa_large() {
+    // Test agent pane accent colors meet at least AA-large
+    let agents = [
+        "claude_code",
+        "codex",
+        "cline",
+        "gemini",
+        "amp",
+        "aider",
+        "cursor",
+        "chatgpt",
+        "opencode",
+        "pi_agent",
+    ];
+
+    for agent in agents {
+        let pane = ThemePalette::agent_pane(agent);
+        let level = check_contrast(pane.accent, pane.bg);
+        assert!(
+            level.meets(ContrastLevel::AALarge),
+            "Agent '{}' pane: accent should meet WCAG AA-large against bg, got {:?} (ratio: {:.2}:1)",
+            agent,
+            level,
+            contrast_ratio(pane.accent, pane.bg)
+        );
+    }
+}
+
+#[test]
+fn hint_text_meets_wcag_aa_large() {
+    // Hint text should meet at least AA-large for all themes
+    for preset in ThemePreset::all() {
+        let palette = preset.to_palette();
+        let level = check_contrast(palette.hint, palette.bg);
+        assert!(
+            level.meets(ContrastLevel::AALarge),
+            "{:?} theme: hint text should meet WCAG AA-large against bg, got {:?} (ratio: {:.2}:1)",
+            preset,
+            level,
+            contrast_ratio(palette.hint, palette.bg)
+        );
+    }
+}
+
+#[test]
+fn accent_colors_meet_wcag_aa_large() {
+    // Primary and secondary accent colors should meet AA-large
+    for preset in ThemePreset::all() {
+        let palette = preset.to_palette();
+
+        let primary_level = check_contrast(palette.accent, palette.bg);
+        assert!(
+            primary_level.meets(ContrastLevel::AALarge),
+            "{:?} theme: primary accent should meet WCAG AA-large, got {:?}",
+            preset,
+            primary_level
+        );
+
+        let secondary_level = check_contrast(palette.accent_alt, palette.bg);
+        assert!(
+            secondary_level.meets(ContrastLevel::AALarge),
+            "{:?} theme: secondary accent should meet WCAG AA-large, got {:?}",
+            preset,
+            secondary_level
+        );
+    }
+}
+
+#[test]
+fn surface_text_meets_wcag_aa() {
+    // Text on elevated surfaces should meet AA
+    for preset in ThemePreset::all() {
+        let palette = preset.to_palette();
+        let level = check_contrast(palette.fg, palette.surface);
+        assert!(
+            level.meets(ContrastLevel::AA),
+            "{:?} theme: fg should meet WCAG AA on surface, got {:?}",
+            preset,
+            level
+        );
+    }
+}
+
+#[test]
+fn stripe_odd_allows_text_visibility() {
+    // Text on odd stripes should still be readable
+    for preset in ThemePreset::all() {
+        let palette = preset.to_palette();
+        let level = check_contrast(palette.fg, palette.stripe_odd);
+        assert!(
+            level.meets(ContrastLevel::AA),
+            "{:?} theme: fg should meet WCAG AA on stripe_odd, got {:?}",
+            preset,
+            level
+        );
+    }
+}
+
+#[test]
+fn remote_source_badge_contrast() {
+    // Remote source badges (using hint color) should be visible
+    for preset in ThemePreset::all() {
+        let palette = preset.to_palette();
+        // Badge text on surface background
+        let level = check_contrast(palette.hint, palette.surface);
+        assert!(
+            level.meets(ContrastLevel::AALarge),
+            "{:?} theme: hint (badges) should meet AA-large on surface, got {:?}",
+            preset,
+            level
+        );
+    }
+}
+
+#[test]
+fn dark_theme_specific_color_audit() {
+    // Specific audit of the dark theme colors
+    use coding_agent_search::ui::components::theme::colors;
+
+    // Primary text on deep background
+    let text_on_bg = contrast_ratio(colors::TEXT_PRIMARY, colors::BG_DEEP);
+    assert!(
+        text_on_bg >= 4.5,
+        "TEXT_PRIMARY on BG_DEEP should be >= 4.5:1, got {:.2}:1",
+        text_on_bg
+    );
+
+    // Secondary text on deep background
+    let secondary_on_bg = contrast_ratio(colors::TEXT_SECONDARY, colors::BG_DEEP);
+    assert!(
+        secondary_on_bg >= 4.5,
+        "TEXT_SECONDARY on BG_DEEP should be >= 4.5:1, got {:.2}:1",
+        secondary_on_bg
+    );
+
+    // Muted text should meet AA-large (3:1)
+    let muted_on_bg = contrast_ratio(colors::TEXT_MUTED, colors::BG_DEEP);
+    assert!(
+        muted_on_bg >= 3.0,
+        "TEXT_MUTED on BG_DEEP should be >= 3:1, got {:.2}:1",
+        muted_on_bg
+    );
+
+    // Primary text on surface
+    let text_on_surface = contrast_ratio(colors::TEXT_PRIMARY, colors::BG_SURFACE);
+    assert!(
+        text_on_surface >= 4.5,
+        "TEXT_PRIMARY on BG_SURFACE should be >= 4.5:1, got {:.2}:1",
+        text_on_surface
+    );
+}
+
+#[test]
+fn role_theme_backgrounds_allow_text_visibility() {
+    // Role-specific backgrounds should allow text visibility
+    use coding_agent_search::ui::components::theme::colors;
+
+    let role_bgs = [
+        ("user", colors::ROLE_USER_BG, colors::ROLE_USER),
+        ("agent", colors::ROLE_AGENT_BG, colors::ROLE_AGENT),
+        ("tool", colors::ROLE_TOOL_BG, colors::ROLE_TOOL),
+        ("system", colors::ROLE_SYSTEM_BG, colors::ROLE_SYSTEM),
+    ];
+
+    for (role, bg, fg) in role_bgs {
+        // Role color on role background
+        let level = check_contrast(fg, bg);
+        assert!(
+            level.meets(ContrastLevel::AALarge),
+            "{} role: fg should meet AA-large on role bg, got {:?} (ratio: {:.2}:1)",
+            role,
+            level,
+            contrast_ratio(fg, bg)
+        );
+
+        // Primary text on role background
+        let text_level = check_contrast(colors::TEXT_PRIMARY, bg);
+        assert!(
+            text_level.meets(ContrastLevel::AA),
+            "{} role: TEXT_PRIMARY should meet AA on role bg, got {:?}",
+            role,
+            text_level
+        );
+    }
+}
