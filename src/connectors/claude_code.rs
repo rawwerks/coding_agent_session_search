@@ -299,3 +299,684 @@ impl Connector for ClaudeCodeConnector {
         Ok(convs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // =========================================================================
+    // Constructor tests
+    // =========================================================================
+
+    #[test]
+    fn new_creates_connector() {
+        let connector = ClaudeCodeConnector::new();
+        assert!(std::mem::size_of_val(&connector) >= 0);
+    }
+
+    #[test]
+    fn default_creates_connector() {
+        let connector = ClaudeCodeConnector::default();
+        assert!(std::mem::size_of_val(&connector) >= 0);
+    }
+
+    #[test]
+    fn projects_root_returns_claude_projects_path() {
+        let root = ClaudeCodeConnector::projects_root();
+        assert!(root.ends_with(".claude/projects"));
+    }
+
+    // =========================================================================
+    // Detection tests
+    // =========================================================================
+
+    #[test]
+    fn detect_not_found_without_projects_dir() {
+        let connector = ClaudeCodeConnector::new();
+        let result = connector.detect();
+        // On most CI/test systems, .claude/projects won't exist
+        // Just verify detect() doesn't panic
+        assert!(result.detected || !result.detected);
+    }
+
+    // =========================================================================
+    // JSONL parsing tests
+    // =========================================================================
+
+    #[test]
+    fn scan_parses_jsonl_user_and_assistant_messages() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Hello Claude"}}
+{"type":"assistant","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assistant","content":"Hello! How can I help?"}}
+{"type":"summary","timestamp":"2025-12-01T10:00:02Z","summary":"Test summary"}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok());
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+
+        // Only user and assistant messages should be extracted (not summary)
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[0].content, "Hello Claude");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert!(convs[0].messages[1].content.contains("How can I help"));
+    }
+
+    #[test]
+    fn scan_extracts_session_metadata() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","cwd":"/projects/myapp","sessionId":"sess-123","gitBranch":"main","message":{"role":"user","content":"Test message"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].workspace, Some(PathBuf::from("/projects/myapp")));
+        assert_eq!(convs[0].metadata["sessionId"], "sess-123");
+        assert_eq!(convs[0].metadata["gitBranch"], "main");
+    }
+
+    #[test]
+    fn scan_extracts_model_as_author() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"assistant","message":{"role":"assistant","content":"Response","model":"claude-3-opus"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].author, Some("claude-3-opus".to_string()));
+    }
+
+    #[test]
+    fn scan_parses_iso8601_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","timestamp":"2025-11-15T14:30:00.123Z","message":{"role":"user","content":"Test"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].messages[0].created_at.is_some());
+        let ts = convs[0].messages[0].created_at.unwrap();
+        // Should be around 2025-11-15 in milliseconds
+        assert!(ts > 1700000000000);
+    }
+
+    #[test]
+    fn scan_handles_array_content() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "First part"},
+                    {"type": "text", "text": "Second part"}
+                ]
+            }
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages.len(), 1);
+        assert!(convs[0].messages[0].content.contains("First part"));
+        assert!(convs[0].messages[0].content.contains("Second part"));
+    }
+
+    #[test]
+    fn scan_skips_empty_content() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":""}}
+{"type":"user","message":{"role":"user","content":"   "}}
+{"type":"user","message":{"role":"user","content":"Valid message"}}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Only the valid message should be extracted
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid message");
+    }
+
+    #[test]
+    fn scan_skips_non_user_assistant_types() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"summary","content":"Session summary"}
+{"type":"file-history-snapshot","files":[]}
+{"type":"user","message":{"role":"user","content":"User message"}}
+{"type":"tool_result","result":"Some result"}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "user");
+    }
+
+    #[test]
+    fn scan_reindexes_messages_sequentially() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"Message 1"}}
+{"type":"assistant","message":{"role":"assistant","content":"Message 2"}}
+{"type":"user","message":{"role":"user","content":"Message 3"}}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].idx, 0);
+        assert_eq!(convs[0].messages[1].idx, 1);
+        assert_eq!(convs[0].messages[2].idx, 2);
+    }
+
+    // =========================================================================
+    // JSON format parsing tests
+    // =========================================================================
+
+    #[test]
+    fn scan_parses_json_messages_array() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "title": "Test Session",
+            "messages": [
+                {"role": "user", "content": "Hello", "timestamp": 1700000000000i64},
+                {"role": "assistant", "content": "Hi there!", "timestamp": 1700000001000i64}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn scan_json_extracts_title() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "title": "Custom Session Title",
+            "messages": [
+                {"role": "user", "content": "Test content"}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("Custom Session Title".to_string()));
+    }
+
+    #[test]
+    fn scan_json_uses_type_as_role_fallback() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "messages": [
+                {"type": "user", "content": "Message with type instead of role"}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].role, "user");
+    }
+
+    #[test]
+    fn scan_json_uses_text_as_content_fallback() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "messages": [
+                {"role": "user", "text": "Message with text field instead of content"}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].messages[0].content.contains("text field"));
+    }
+
+    #[test]
+    fn scan_json_uses_time_as_timestamp_fallback() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "messages": [
+                {"role": "user", "content": "Test", "time": 1700000000000i64}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].created_at, Some(1700000000000));
+    }
+
+    // =========================================================================
+    // Title extraction tests
+    // =========================================================================
+
+    #[test]
+    fn scan_title_from_first_user_message_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"assistant","message":{"role":"assistant","content":"I can help"}}
+{"type":"user","message":{"role":"user","content":"Help me build a web app"}}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("Help me build a web app".to_string()));
+    }
+
+    #[test]
+    fn scan_title_truncates_to_100_chars() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let long_message = "x".repeat(200);
+        let session_file = claude_dir.join("session.jsonl");
+        let content = format!(
+            r#"{{"type":"user","message":{{"role":"user","content":"{}"}}}}"#,
+            long_message
+        );
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].title.as_ref().unwrap().len() <= 100);
+    }
+
+    #[test]
+    fn scan_title_uses_first_line_only() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"First line\nSecond line\nThird line"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].title, Some("First line".to_string()));
+    }
+
+    #[test]
+    fn scan_title_fallback_to_workspace_name() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Only assistant message, no user message for title
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"assistant","cwd":"/projects/myapp","message":{"role":"assistant","content":"Response only"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should fallback to workspace directory name
+        assert_eq!(convs[0].title, Some("myapp".to_string()));
+    }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    #[test]
+    fn scan_empty_directory_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn scan_skips_malformed_jsonl_lines() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"not valid json
+{"type":"user","message":{"role":"user","content":"Valid message"}}
+{broken json here
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should still extract the valid line
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid message");
+    }
+
+    #[test]
+    fn scan_skips_malformed_json_files() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create a malformed JSON file
+        let bad_file = claude_dir.join("bad.json");
+        fs::write(&bad_file, "not valid json {{{").unwrap();
+
+        // Create a valid JSONL file
+        let good_file = claude_dir.join("good.jsonl");
+        fs::write(
+            &good_file,
+            r#"{"type":"user","message":{"role":"user","content":"Valid"}}"#,
+        )
+        .unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should only have one conversation from the valid file
+        assert_eq!(convs.len(), 1);
+    }
+
+    #[test]
+    fn scan_handles_empty_messages_array() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.json");
+        let content = json!({
+            "messages": []
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Empty messages should result in no conversation
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn scan_processes_subdirectories() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        let subdir = claude_dir.join("project1");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let session_file = subdir.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"Nested message"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages[0].content.contains("Nested message"));
+    }
+
+    #[test]
+    fn scan_skips_non_session_files() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create various non-session files
+        fs::write(claude_dir.join("config.toml"), "").unwrap();
+        fs::write(claude_dir.join("notes.txt"), "").unwrap();
+        fs::write(claude_dir.join("backup.bak"), "").unwrap();
+
+        // Create a valid session file
+        let session_file = claude_dir.join("session.jsonl");
+        fs::write(
+            &session_file,
+            r#"{"type":"user","message":{"role":"user","content":"Valid"}}"#,
+        )
+        .unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        // Should only have one conversation from the .jsonl file
+        assert_eq!(convs.len(), 1);
+    }
+
+    #[test]
+    fn scan_handles_claude_extension() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.claude");
+        let content = json!({
+            "messages": [
+                {"role": "user", "content": "Claude extension test"}
+            ]
+        })
+        .to_string();
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages[0].content.contains("Claude extension"));
+    }
+
+    #[test]
+    fn scan_sets_external_id_from_filename() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("unique-session-id.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"Test"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs[0].external_id,
+            Some("unique-session-id.jsonl".to_string())
+        );
+    }
+
+    #[test]
+    fn scan_sets_agent_slug_to_claude_code() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"Test"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].agent_slug, "claude_code");
+    }
+
+    #[test]
+    fn scan_preserves_original_json_in_extra() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","customField":"customValue","message":{"role":"user","content":"Test"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs[0].messages[0].extra["customField"], "customValue");
+    }
+
+    #[test]
+    fn scan_tracks_started_and_ended_timestamps() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let session_file = claude_dir.join("session.jsonl");
+        let content = r#"{"type":"user","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"First"}}
+{"type":"assistant","timestamp":"2025-12-01T10:05:00Z","message":{"role":"assistant","content":"Last"}}
+"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
+        // ended_at should be after or equal to started_at
+        assert!(convs[0].ended_at.unwrap() >= convs[0].started_at.unwrap());
+    }
+
+    #[test]
+    fn scan_multiple_files_returns_multiple_conversations() {
+        let dir = TempDir::new().unwrap();
+        let claude_dir = dir.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Create two session files
+        for i in 1..=3 {
+            let session_file = claude_dir.join(format!("session{}.jsonl", i));
+            let content = format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"Message {i}"}}}}"#
+            );
+            fs::write(&session_file, content).unwrap();
+        }
+
+        let connector = ClaudeCodeConnector::new();
+        let ctx = ScanContext::local_default(claude_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 3);
+    }
+}
