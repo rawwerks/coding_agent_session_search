@@ -7904,11 +7904,6 @@ fn run_sources_sync(
 
         total_files += report.total_files();
         total_bytes += report.total_bytes();
-        all_reports.push(serde_json::json!({
-            "source": source.name,
-            "files": report.total_files(),
-            "bytes": report.total_bytes(),
-        }));
     }
 
     // Save sync status

@@ -20,7 +20,7 @@
 //!
 //! for source in config.remote_sources() {
 //!     let report = engine.sync_source(source)?;
-//!     println!("Synced {}: {} files", source.name, report.files_transferred);
+//!     println!("Synced {}: {} files", source.name, report.total_files());
 //! }
 //! ```
 
