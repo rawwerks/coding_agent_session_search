@@ -942,3 +942,716 @@ fn sources_multiple_add_list() {
     assert!(names.contains(&"laptop"));
     assert!(names.contains(&"workstation"));
 }
+
+// =============================================================================
+// sources mappings list tests
+// =============================================================================
+
+/// Test: sources mappings list with no mappings configured.
+#[test]
+fn mappings_list_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No") || stdout.contains("0 mapping"),
+        "Expected no mappings message, got: {stdout}"
+    );
+}
+
+/// Test: sources mappings list with mappings configured.
+#[test]
+fn mappings_list_with_mappings() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/home/user/projects") && stdout.contains("/Users/me/projects"),
+        "Expected mapping paths in output, got: {stdout}"
+    );
+}
+
+/// Test: sources mappings list --json outputs valid JSON.
+#[test]
+fn mappings_list_json() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop", "--json"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list --json command");
+
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid JSON output");
+
+    assert!(
+        json.get("mappings").is_some(),
+        "Expected 'mappings' field in JSON"
+    );
+}
+
+/// Test: sources mappings list for nonexistent source.
+#[test]
+fn mappings_list_nonexistent_source() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "nonexistent"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings list command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("does not exist"),
+        "Expected not found error, got: {stderr}"
+    );
+}
+
+// =============================================================================
+// sources mappings add tests
+// =============================================================================
+
+/// Test: sources mappings add basic mapping.
+#[test]
+fn mappings_add_basic() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/remote/path",
+            "--to",
+            "/local/path",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+
+    assert!(
+        output.status.success(),
+        "mappings add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify config was updated
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("/remote/path") && config_content.contains("/local/path"),
+        "Mapping not in config: {config_content}"
+    );
+}
+
+/// Test: sources mappings add with agent filter.
+#[test]
+fn mappings_add_with_agents() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/opt/work",
+            "--to",
+            "/Volumes/Work",
+            "--agents",
+            "claude_code,codex",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+
+    assert!(
+        output.status.success(),
+        "mappings add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("claude_code") || config_content.contains("agents"),
+        "Agent filter not in config: {config_content}"
+    );
+}
+
+/// Test: sources mappings add multiple mappings.
+#[test]
+fn mappings_add_multiple() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    // Add first mapping
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/home/user",
+            "--to",
+            "/Users/me",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+
+    // Add second mapping
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/opt/projects",
+            "--to",
+            "/Projects",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+
+    // Verify both mappings are in config
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("/home/user") && config_content.contains("/opt/projects"),
+        "Both mappings not in config: {config_content}"
+    );
+}
+
+/// Test: sources mappings add to nonexistent source.
+#[test]
+fn mappings_add_nonexistent_source() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "nonexistent",
+            "--from",
+            "/from",
+            "--to",
+            "/to",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings add command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("does not exist"),
+        "Expected not found error, got: {stderr}"
+    );
+}
+
+// =============================================================================
+// sources mappings remove tests
+// =============================================================================
+
+/// Test: sources mappings remove by index.
+#[test]
+fn mappings_remove_by_index() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user"
+to = "/Users/me"
+
+[[sources.path_mappings]]
+from = "/opt/work"
+to = "/Work"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+
+    assert!(
+        output.status.success(),
+        "mappings remove failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // First mapping should be gone, second should remain
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        !config_content.contains("/home/user"),
+        "Removed mapping still in config"
+    );
+    assert!(
+        config_content.contains("/opt/work"),
+        "Other mapping incorrectly removed"
+    );
+}
+
+/// Test: sources mappings remove with invalid index.
+#[test]
+fn mappings_remove_invalid_index() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user"
+to = "/Users/me"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "99"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("index") || stderr.contains("out of") || stderr.contains("range"),
+        "Expected index error, got: {stderr}"
+    );
+}
+
+/// Test: sources mappings remove from empty mappings list.
+#[test]
+fn mappings_remove_from_empty() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings remove command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no mapping") || stderr.contains("empty") || stderr.contains("index"),
+        "Expected no mappings error, got: {stderr}"
+    );
+}
+
+// =============================================================================
+// sources mappings test tests
+// =============================================================================
+
+/// Test: sources mappings test with matching path.
+#[test]
+fn mappings_test_match() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/home/user/projects/myapp/src/main.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/Users/me/projects/myapp/src/main.rs"),
+        "Expected rewritten path, got: {stdout}"
+    );
+}
+
+/// Test: sources mappings test with non-matching path.
+#[test]
+fn mappings_test_no_match() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/opt/other/path/file.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Path should be unchanged or indicate no match
+    assert!(
+        stdout.contains("/opt/other/path/file.rs") || stdout.contains("no match"),
+        "Expected unchanged path or no match, got: {stdout}"
+    );
+}
+
+/// Test: sources mappings test with agent filter.
+#[test]
+fn mappings_test_with_agent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user"
+to = "/Users/me"
+agents = ["claude_code"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    // Test with matching agent
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/home/user/file.rs",
+            "--agent",
+            "claude_code",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources mappings test command");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/Users/me/file.rs"),
+        "Expected rewritten path for matching agent, got: {stdout}"
+    );
+}
+
+// =============================================================================
+// mappings workflow integration test
+// =============================================================================
+
+/// Test: Complete mappings workflow - add, list, test, remove.
+#[test]
+fn mappings_workflow_complete() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    create_sources_config(
+        &config_dir,
+        r#"
+[[sources]]
+name = "laptop"
+type = "ssh"
+host = "user@laptop.local"
+paths = ["~/.claude/projects"]
+"#,
+    );
+
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+
+    // 1. Add a mapping
+    cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "laptop",
+            "--from",
+            "/remote/path",
+            "--to",
+            "/local/path",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+
+    // 2. List mappings - should show the added mapping
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/remote/path"));
+
+    // 3. Test the mapping
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "test",
+            "laptop",
+            "/remote/path/subdir/file.rs",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("test command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("/local/path/subdir/file.rs"));
+
+    // 4. Remove the mapping
+    cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "remove", "laptop", "0"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .assert()
+        .success();
+
+    // 5. List again - should be empty
+    let output = cargo_bin_cmd!("cass")
+        .args(["sources", "mappings", "list", "laptop"])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("list command");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // After removal, should show "No path mappings" message
+    assert!(
+        stdout.contains("No") || !stdout.contains("/remote/path"),
+        "Mapping should be removed, got: {stdout}"
+    );
+}
