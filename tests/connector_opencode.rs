@@ -758,3 +758,390 @@ fn opencode_external_id_is_session_id() {
 
     assert_eq!(convs[0].external_id.as_deref(), Some("external-id-test"));
 }
+
+// =============================================================================
+// Edge Case Tests (TST.CON)
+// =============================================================================
+
+#[test]
+fn opencode_handles_corrupted_session_json() {
+    let dir = TempDir::new().unwrap();
+
+    // Create session dir with corrupted JSON
+    let project_dir = dir.path().join("session").join("proj1");
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::create_dir_all(dir.path().join("message")).unwrap();
+    fs::create_dir_all(dir.path().join("part")).unwrap();
+
+    // Write corrupted JSON (not valid JSON)
+    fs::write(
+        project_dir.join("corrupted-session.json"),
+        "{ this is not valid json at all",
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    // Should not panic, just skip the corrupted file
+    let convs = connector.scan(&ctx).unwrap();
+    assert!(convs.is_empty());
+}
+
+#[test]
+fn opencode_handles_partial_session_data() {
+    let dir = TempDir::new().unwrap();
+
+    // Create session with minimal required fields only
+    let project_dir = dir.path().join("session").join("proj1");
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::create_dir_all(dir.path().join("message")).unwrap();
+    fs::create_dir_all(dir.path().join("part")).unwrap();
+
+    // Session JSON with only id and projectID (no title, no directory, no time)
+    let session_json = serde_json::json!({
+        "id": "minimal-session",
+        "projectID": "proj1"
+    });
+    fs::write(
+        project_dir.join("minimal-session.json"),
+        serde_json::to_string_pretty(&session_json).unwrap(),
+    )
+    .unwrap();
+
+    // Add a message
+    let msg_dir = dir.path().join("message").join("minimal-session");
+    fs::create_dir_all(&msg_dir).unwrap();
+    let msg_json = serde_json::json!({
+        "id": "msg1",
+        "sessionID": "minimal-session",
+        "role": "user"
+    });
+    fs::write(
+        msg_dir.join("msg1.json"),
+        serde_json::to_string_pretty(&msg_json).unwrap(),
+    )
+    .unwrap();
+
+    // Add a part
+    let part_dir = dir.path().join("part").join("msg1");
+    fs::create_dir_all(&part_dir).unwrap();
+    let part_json = serde_json::json!({
+        "id": "part1",
+        "messageID": "msg1",
+        "type": "text",
+        "text": "Hello from partial session"
+    });
+    fs::write(
+        part_dir.join("part1.json"),
+        serde_json::to_string_pretty(&part_json).unwrap(),
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    // Title should fall back to first message content
+    assert!(c.title.is_some());
+    // Workspace should be None since directory wasn't provided
+    assert!(c.workspace.is_none());
+    assert_eq!(c.messages.len(), 1);
+    assert!(c.messages[0].content.contains("Hello from partial session"));
+}
+
+#[test]
+fn opencode_handles_unicode_content() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "unicode-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Unicode Test 你好".into()),
+            directory: Some("/home/用户/项目".into()),
+            created: Some(1000),
+            updated: None,
+            messages: vec![
+                TestMessage {
+                    id: "msg1".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Hello 世界! 🚀 émojis and Ümlauts café".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "msg2".into(),
+                    role: "assistant".into(),
+                    model_id: Some("claude-3".into()),
+                    created: Some(2000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("日本語 한국어 ภาษาไทย العربية".into()),
+                        state: None,
+                    }],
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    // Title should preserve Unicode
+    assert!(c.title.as_ref().unwrap().contains("你好"));
+    // Workspace path should preserve Unicode
+    assert!(c.workspace.as_ref().unwrap().to_str().unwrap().contains("用户"));
+    // Messages should preserve Unicode
+    assert!(c.messages[0].content.contains("世界"));
+    assert!(c.messages[0].content.contains("🚀"));
+    assert!(c.messages[0].content.contains("café"));
+    assert!(c.messages[1].content.contains("日本語"));
+    assert!(c.messages[1].content.contains("العربية"));
+}
+
+#[test]
+fn opencode_handles_very_long_session() {
+    let dir = TempDir::new().unwrap();
+
+    // Create a session with many messages to test performance
+    let mut messages = Vec::new();
+    for i in 0..200 {
+        messages.push(TestMessage {
+            id: format!("msg{}", i),
+            role: if i % 2 == 0 { "user".into() } else { "assistant".into() },
+            model_id: if i % 2 == 1 { Some("claude-3".into()) } else { None },
+            created: Some(1000 + i as i64),
+            parts: vec![TestPart {
+                part_type: "text".into(),
+                text: Some(format!("Message number {} with some content to make it realistic", i)),
+                state: None,
+            }],
+        });
+    }
+
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "long-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Long Session Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: Some(2000),
+            messages,
+        }],
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+
+    let start = std::time::Instant::now();
+    let convs = connector.scan(&ctx).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(convs.len(), 1);
+    assert_eq!(convs[0].messages.len(), 200);
+
+    // Verify indices are sequential
+    for (i, msg) in convs[0].messages.iter().enumerate() {
+        assert_eq!(msg.idx, i as i64);
+    }
+
+    // Should complete in reasonable time (< 5 seconds)
+    assert!(
+        elapsed.as_secs() < 5,
+        "Parsing 200 messages took too long: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn opencode_handles_empty_message_parts() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "empty-parts-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Empty Parts Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![
+                TestMessage {
+                    id: "valid-msg".into(),
+                    role: "user".into(),
+                    model_id: None,
+                    created: Some(1000),
+                    parts: vec![TestPart {
+                        part_type: "text".into(),
+                        text: Some("Valid message".into()),
+                        state: None,
+                    }],
+                },
+                TestMessage {
+                    id: "empty-parts-msg".into(),
+                    role: "assistant".into(),
+                    model_id: None,
+                    created: Some(2000),
+                    parts: vec![], // No parts
+                },
+            ],
+        }],
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    // Should have at least the valid message
+    assert!(!convs[0].messages.is_empty());
+    assert!(convs[0].messages.iter().any(|m| m.content.contains("Valid message")));
+}
+
+#[test]
+fn opencode_handles_null_text_parts() {
+    let dir = TempDir::new().unwrap();
+    create_test_storage(
+        dir.path(),
+        &[TestSession {
+            id: "null-text-session".into(),
+            project_id: "proj1".into(),
+            title: Some("Null Text Test".into()),
+            directory: None,
+            created: Some(1000),
+            updated: None,
+            messages: vec![TestMessage {
+                id: "null-text-msg".into(),
+                role: "assistant".into(),
+                model_id: None,
+                created: Some(1000),
+                parts: vec![
+                    TestPart {
+                        part_type: "text".into(),
+                        text: None, // Null text
+                        state: None,
+                    },
+                    TestPart {
+                        part_type: "text".into(),
+                        text: Some("Valid text".into()),
+                        state: None,
+                    },
+                ],
+            }],
+        }],
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    // Should have the message with valid text
+    assert!(!convs[0].messages.is_empty());
+    assert!(convs[0].messages[0].content.contains("Valid text"));
+}
+
+#[test]
+fn opencode_handles_deeply_nested_project_dirs() {
+    let dir = TempDir::new().unwrap();
+
+    // Create deeply nested project structure
+    let deep_project_id = "very/deeply/nested/project";
+    let project_dir = dir.path().join("session").join(deep_project_id);
+    fs::create_dir_all(&project_dir).unwrap();
+    fs::create_dir_all(dir.path().join("message")).unwrap();
+    fs::create_dir_all(dir.path().join("part")).unwrap();
+
+    let session_json = serde_json::json!({
+        "id": "nested-session",
+        "title": "Nested Project Session",
+        "projectID": deep_project_id,
+        "directory": "/home/user/nested/project"
+    });
+    fs::write(
+        project_dir.join("nested-session.json"),
+        serde_json::to_string_pretty(&session_json).unwrap(),
+    )
+    .unwrap();
+
+    // Add message
+    let msg_dir = dir.path().join("message").join("nested-session");
+    fs::create_dir_all(&msg_dir).unwrap();
+    let msg_json = serde_json::json!({
+        "id": "msg1",
+        "sessionID": "nested-session",
+        "role": "user"
+    });
+    fs::write(
+        msg_dir.join("msg1.json"),
+        serde_json::to_string_pretty(&msg_json).unwrap(),
+    )
+    .unwrap();
+
+    // Add part
+    let part_dir = dir.path().join("part").join("msg1");
+    fs::create_dir_all(&part_dir).unwrap();
+    let part_json = serde_json::json!({
+        "id": "part1",
+        "messageID": "msg1",
+        "type": "text",
+        "text": "Content from nested project"
+    });
+    fs::write(
+        part_dir.join("part1.json"),
+        serde_json::to_string_pretty(&part_json).unwrap(),
+    )
+    .unwrap();
+
+    let connector = OpenCodeConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.title, Some("Nested Project Session".to_string()));
+    assert!(c.messages[0].content.contains("Content from nested project"));
+}

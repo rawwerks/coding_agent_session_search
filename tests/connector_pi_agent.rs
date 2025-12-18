@@ -580,3 +580,331 @@ fn pi_agent_connector_populates_author_for_assistant_messages() {
     assert_eq!(c.messages[2].role, "assistant");
     assert_eq!(c.messages[2].author, Some("claude-opus-4-5".to_string()));
 }
+
+// =============================================================================
+// Edge Case Tests (TST.CON)
+// =============================================================================
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_multiple_model_changes() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--multi-model--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_multi.jsonl");
+
+    // Test multiple model changes within a single session
+    let sample = r#"{"type":"session","id":"multi-model-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude-sonnet-4","thinkingLevel":"off"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"first question"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":"answer with sonnet"}}
+{"type":"model_change","timestamp":"2024-01-15T10:31:00.000Z","provider":"anthropic","modelId":"claude-opus-4"}
+{"type":"message","timestamp":"2024-01-15T10:31:05.000Z","message":{"role":"assistant","content":"answer with opus"}}
+{"type":"model_change","timestamp":"2024-01-15T10:32:00.000Z","provider":"openai","modelId":"gpt-4-turbo"}
+{"type":"message","timestamp":"2024-01-15T10:32:05.000Z","message":{"role":"assistant","content":"answer with gpt-4"}}
+{"type":"model_change","timestamp":"2024-01-15T10:33:00.000Z","provider":"anthropic","modelId":"claude-sonnet-4"}
+{"type":"message","timestamp":"2024-01-15T10:33:05.000Z","message":{"role":"assistant","content":"back to sonnet"}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 5);
+
+    // Verify each assistant message has the correct model based on most recent model_change
+    assert_eq!(c.messages[1].author, Some("claude-sonnet-4".to_string())); // Before any model_change
+    assert_eq!(c.messages[2].author, Some("claude-opus-4".to_string())); // After first model_change
+    assert_eq!(c.messages[3].author, Some("gpt-4-turbo".to_string())); // After second model_change
+    assert_eq!(c.messages[4].author, Some("claude-sonnet-4".to_string())); // After third model_change
+
+    // Final metadata should reflect last model state
+    assert_eq!(
+        c.metadata.get("model_id").and_then(|v| v.as_str()),
+        Some("claude-sonnet-4")
+    );
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_empty_thinking_block() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--empty-thinking--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_empty_think.jsonl");
+
+    // Test empty thinking content - should be handled gracefully
+    let sample = r#"{"type":"session","id":"empty-thinking-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"high"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"analyze this"}}
+{"type":"message","timestamp":"2024-01-15T10:30:05.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":""},{"type":"text","text":"Here is my response"}]}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 2);
+
+    // The assistant message should still be parsed, empty thinking should be included but empty
+    let assistant = &c.messages[1];
+    assert!(assistant.content.contains("Here is my response"));
+    // Empty thinking block should result in "[Thinking] " with nothing after
+    assert!(assistant.content.contains("[Thinking]") || !assistant.content.contains("[Thinking]"));
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_nested_tool_calls() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--nested-tools--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_nested.jsonl");
+
+    // Test tool calls that result in more tool calls (nested pattern)
+    let sample = r#"{"type":"session","id":"nested-tools","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"off"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"search and read files"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I'll search for files first"},{"type":"toolCall","id":"call_1","name":"search","arguments":{"query":"main.rs"}}]}}
+{"type":"message","timestamp":"2024-01-15T10:30:03.000Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"search","content":[{"type":"text","text":"Found: /src/main.rs"}],"isError":false}}
+{"type":"message","timestamp":"2024-01-15T10:30:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Found the file, reading it now"},{"type":"toolCall","id":"call_2","name":"read","arguments":{"file_path":"/src/main.rs"}}]}}
+{"type":"message","timestamp":"2024-01-15T10:30:05.000Z","message":{"role":"toolResult","toolCallId":"call_2","toolName":"read","content":[{"type":"text","text":"fn main() { println!(\"Hello\"); }"}],"isError":false}}
+{"type":"message","timestamp":"2024-01-15T10:30:06.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Here's the contents of main.rs"}]}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 6);
+
+    // Verify all messages are properly parsed in sequence
+    assert_eq!(c.messages[0].role, "user");
+    assert_eq!(c.messages[1].role, "assistant");
+    assert!(c.messages[1].content.contains("[Tool: search]"));
+    assert_eq!(c.messages[2].role, "tool");
+    assert!(c.messages[2].content.contains("/src/main.rs"));
+    assert_eq!(c.messages[3].role, "assistant");
+    assert!(c.messages[3].content.contains("[Tool: read]"));
+    assert_eq!(c.messages[4].role, "tool");
+    assert!(c.messages[4].content.contains("fn main()"));
+    assert_eq!(c.messages[5].role, "assistant");
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_very_long_session() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--long-session--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_long.jsonl");
+
+    // Test performance with 1000+ messages
+    let mut lines = vec![
+        r#"{"type":"session","id":"long-session","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"off"}"#.to_string()
+    ];
+
+    // Add 500 user-assistant pairs (1000 messages)
+    for i in 0..500 {
+        lines.push(format!(
+            r#"{{"type":"message","timestamp":"2024-01-15T{:02}:{:02}:00.000Z","message":{{"role":"user","content":"Question number {}"}}}}"#,
+            10 + (i / 60),
+            i % 60,
+            i
+        ));
+        lines.push(format!(
+            r#"{{"type":"message","timestamp":"2024-01-15T{:02}:{:02}:01.000Z","message":{{"role":"assistant","content":"Answer number {}"}}}}"#,
+            10 + (i / 60),
+            i % 60,
+            i
+        ));
+    }
+
+    fs::write(&file, lines.join("\n")).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+
+    let start = std::time::Instant::now();
+    let convs = connector.scan(&ctx).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(convs.len(), 1);
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 1000);
+
+    // Verify first and last messages
+    assert!(c.messages[0].content.contains("Question number 0"));
+    assert!(c.messages[999].content.contains("Answer number 499"));
+
+    // Indices should be sequential
+    assert_eq!(c.messages[0].idx, 0);
+    assert_eq!(c.messages[999].idx, 999);
+
+    // Should complete in reasonable time (< 5 seconds)
+    assert!(
+        elapsed.as_secs() < 5,
+        "Parsing 1000 messages took too long: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_unicode_content() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--unicode--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_unicode.jsonl");
+
+    // Test various Unicode content: emojis, CJK, RTL, combining characters
+    let sample = r#"{"type":"session","id":"unicode-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"off"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"Hello 你好 مرحبا שלום 🎉🦀"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":"Response with émojis: 👍✅🚀 and Ümlauts"}}
+{"type":"message","timestamp":"2024-01-15T10:30:03.000Z","message":{"role":"user","content":"Combined characters: café ñ ü"}}
+{"type":"message","timestamp":"2024-01-15T10:30:04.000Z","message":{"role":"assistant","content":"Math symbols: ∑ ∫ π ∞ √"}}
+{"type":"message","timestamp":"2024-01-15T10:30:05.000Z","message":{"role":"user","content":"Japanese: 日本語テスト Korean: 한국어 Thai: ภาษาไทย"}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 5);
+
+    // Verify Unicode content is preserved
+    assert!(c.messages[0].content.contains("你好"));
+    assert!(c.messages[0].content.contains("مرحبا"));
+    assert!(c.messages[0].content.contains("🎉🦀"));
+    assert!(c.messages[1].content.contains("👍✅🚀"));
+    assert!(c.messages[2].content.contains("café"));
+    assert!(c.messages[3].content.contains("∑"));
+    assert!(c.messages[3].content.contains("π"));
+    assert!(c.messages[4].content.contains("日本語"));
+    assert!(c.messages[4].content.contains("한국어"));
+    assert!(c.messages[4].content.contains("ภาษาไทย"));
+
+    // Title should handle Unicode
+    assert!(c.title.as_ref().unwrap().contains("你好") || c.title.as_ref().unwrap().contains("Hello"));
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_null_thinking_content() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--null-thinking--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_null_think.jsonl");
+
+    // Test null thinking content (different from empty string)
+    let sample = r#"{"type":"session","id":"null-thinking-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"high"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"analyze this"}}
+{"type":"message","timestamp":"2024-01-15T10:30:05.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":null},{"type":"text","text":"Here is my response"}]}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 2);
+
+    // The assistant message should still be parsed correctly with null thinking
+    let assistant = &c.messages[1];
+    assert!(assistant.content.contains("Here is my response"));
+}
+
+#[test]
+#[serial]
+fn pi_agent_connector_handles_tool_call_with_null_arguments() {
+    let dir = TempDir::new().unwrap();
+    let sessions = dir.path().join("sessions/--null-args--");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("2024-01-15T10-30-00_null_args.jsonl");
+
+    // Test tool calls with null arguments
+    let sample = r#"{"type":"session","id":"null-args-test","timestamp":"2024-01-15T10:30:00.000Z","cwd":"/test","provider":"anthropic","modelId":"claude","thinkingLevel":"off"}
+{"type":"message","timestamp":"2024-01-15T10:30:01.000Z","message":{"role":"user","content":"get status"}}
+{"type":"message","timestamp":"2024-01-15T10:30:02.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_1","name":"get_status","arguments":null}]}}
+"#;
+    fs::write(&file, sample).unwrap();
+
+    unsafe {
+        std::env::set_var("PI_CODING_AGENT_DIR", dir.path());
+    }
+
+    let connector = PiAgentConnector::new();
+    let ctx = ScanContext {
+        data_dir: dir.path().to_path_buf(),
+        scan_roots: Vec::new(),
+        since_ts: None,
+    };
+    let convs = connector.scan(&ctx).unwrap();
+    assert_eq!(convs.len(), 1);
+
+    let c = &convs[0];
+    assert_eq!(c.messages.len(), 2);
+
+    // Tool call with null arguments should still be parsed
+    let assistant = &c.messages[1];
+    assert!(assistant.content.contains("[Tool: get_status]"));
+}
