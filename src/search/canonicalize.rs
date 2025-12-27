@@ -178,7 +178,11 @@ fn collapse_code_block(lang: &str, lines: &[&str]) -> String {
     } else {
         // Collapse middle
         let head: Vec<_> = lines.iter().take(CODE_HEAD_LINES).copied().collect();
-        let tail: Vec<_> = lines.iter().skip(lines.len() - CODE_TAIL_LINES).copied().collect();
+        let tail: Vec<_> = lines
+            .iter()
+            .skip(lines.len() - CODE_TAIL_LINES)
+            .copied()
+            .collect();
         let omitted = lines.len() - CODE_HEAD_LINES - CODE_TAIL_LINES;
         format!(
             "[{lang_label}]\n{}\n[... {omitted} lines omitted ...]\n{}",
