@@ -10,7 +10,7 @@ pub mod ui;
 pub mod update_check;
 
 use anyhow::Result;
-use base64::{prelude::*, Engine};
+use base64::{Engine, prelude::*};
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use indexer::IndexOptions;

@@ -79,9 +79,7 @@ impl ChatGptConnector {
     fn load_encryption_key() -> Option<[u8; KEY_SIZE]> {
         // Try environment variable first (base64-encoded)
         if let Ok(key_b64) = std::env::var("CHATGPT_ENCRYPTION_KEY") {
-            if let Ok(key_bytes) =
-                base64::prelude::BASE64_STANDARD.decode(key_b64.trim())
-            {
+            if let Ok(key_bytes) = base64::prelude::BASE64_STANDARD.decode(key_b64.trim()) {
                 if key_bytes.len() == KEY_SIZE {
                     let mut key = [0u8; KEY_SIZE];
                     key.copy_from_slice(&key_bytes);
