@@ -292,27 +292,34 @@ impl RemoteInstaller {
     }
 
     /// Choose the best installation method based on system info.
-    pub fn choose_method(&self) -> InstallMethod {
+    ///
+    /// Returns `None` if no viable installation method is available.
+    pub fn choose_method(&self) -> Option<InstallMethod> {
         // 1. Try cargo-binstall first (fastest)
         if self.system_info.has_cargo_binstall {
-            return InstallMethod::CargoBinstall;
+            return Some(InstallMethod::CargoBinstall);
         }
 
         // 2. Try pre-built binary if available for this arch
         if let Some(url) = self.get_prebuilt_url() {
-            return InstallMethod::PrebuiltBinary {
+            return Some(InstallMethod::PrebuiltBinary {
                 url,
                 checksum: None, // TODO: Add checksum support
-            };
+            });
         }
 
         // 3. Try cargo install if cargo is available and we have resources
         if self.system_info.has_cargo && self.can_compile().is_ok() {
-            return InstallMethod::CargoInstall;
+            return Some(InstallMethod::CargoInstall);
         }
 
-        // 4. Fall back to full bootstrap
-        InstallMethod::FullBootstrap
+        // 4. Full bootstrap requires curl to download rustup
+        if self.system_info.has_curl {
+            return Some(InstallMethod::FullBootstrap);
+        }
+
+        // No viable method available
+        None
     }
 
     /// Get pre-built binary URL if available for this architecture.
@@ -362,7 +369,7 @@ impl RemoteInstaller {
         self.check_resources()?;
 
         // Choose method
-        let method = self.choose_method();
+        let method = self.choose_method().ok_or(InstallError::NoMethodAvailable)?;
 
         on_progress(InstallProgress {
             stage: InstallStage::Preparing,
@@ -763,9 +770,8 @@ cass --version 2>&1 || echo "VERIFY_FAILED"
             .arg("-o")
             .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            .arg("-o")
             .arg("LogLevel=ERROR")
+            .arg("--")
             .arg(&self.host)
             .arg("bash")
             .arg("-s");
@@ -879,7 +885,10 @@ mod tests {
         let resources = mock_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
-        assert_eq!(installer.choose_method(), InstallMethod::CargoBinstall);
+        assert_eq!(
+            installer.choose_method(),
+            Some(InstallMethod::CargoBinstall)
+        );
     }
 
     #[test]
@@ -892,7 +901,7 @@ mod tests {
 
         let installer = RemoteInstaller::new("test", system, resources);
         // With cargo but no binstall and no download tools, should choose cargo install
-        assert_eq!(installer.choose_method(), InstallMethod::CargoInstall);
+        assert_eq!(installer.choose_method(), Some(InstallMethod::CargoInstall));
     }
 
     #[test]
@@ -904,7 +913,7 @@ mod tests {
         // With curl available, should prefer pre-built binary over cargo install
         assert!(matches!(
             installer.choose_method(),
-            InstallMethod::PrebuiltBinary { .. }
+            Some(InstallMethod::PrebuiltBinary { .. })
         ));
     }
 
@@ -912,12 +921,30 @@ mod tests {
     fn test_choose_method_bootstrap_when_no_cargo() {
         let mut system = mock_system_info();
         system.has_cargo = false;
+        // curl is needed for bootstrap (to download rustup)
+        system.has_curl = true;
+        system.has_wget = false;
+        // Use unsupported arch so prebuilt binary is not available
+        system.arch = "armv7".into();
+        let resources = mock_resources();
+
+        let installer = RemoteInstaller::new("test", system, resources);
+        assert_eq!(installer.choose_method(), Some(InstallMethod::FullBootstrap));
+    }
+
+    #[test]
+    fn test_choose_method_none_when_no_tools() {
+        let mut system = mock_system_info();
+        system.has_cargo = false;
+        system.has_cargo_binstall = false;
         system.has_curl = false;
         system.has_wget = false;
         let resources = mock_resources();
 
         let installer = RemoteInstaller::new("test", system, resources);
-        assert_eq!(installer.choose_method(), InstallMethod::FullBootstrap);
+        // No curl means no way to download rustup, no wget/curl means no prebuilt binary
+        // No cargo means no cargo install - should return None
+        assert_eq!(installer.choose_method(), None);
     }
 
     #[test]
