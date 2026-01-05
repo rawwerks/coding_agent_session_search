@@ -21,7 +21,7 @@
 //!
 //! installer.install(|progress| {
 //!     println!("{}: {}", progress.stage, progress.message);
-//! }).await?;
+//! })?;
 //! ```
 
 use std::io::Write as IoWrite;
@@ -469,7 +469,8 @@ impl RemoteInstaller {
 mkdir -p ~/.local/bin
 curl -fsSL "{}" -o ~/.local/bin/cass
 chmod +x ~/.local/bin/cass
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+# Add to PATH only if not already present
+grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 "#,
                 url
             )
@@ -479,7 +480,8 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 mkdir -p ~/.local/bin
 wget -q "{}" -O ~/.local/bin/cass
 chmod +x ~/.local/bin/cass
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+# Add to PATH only if not already present
+grep -q '.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 "#,
                 url
             )
@@ -537,6 +539,8 @@ LOG_FILE=~/.cass_install.log
 rm -f "$LOG_FILE"
 
 nohup bash -c '
+# Source cargo env in case this is called after bootstrap rustup install
+source "$HOME/.cargo/env" 2>/dev/null || true
 cargo install {}@{} 2>&1 | tee "$HOME/.cass_install.log"
 echo "===INSTALL_COMPLETE===" >> "$HOME/.cass_install.log"
 ' > /dev/null 2>&1 &
