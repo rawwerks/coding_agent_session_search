@@ -503,36 +503,88 @@ pub enum SourcesCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Interactive wizard to discover, configure, and set up remote sources
+    /// Interactive wizard to discover, configure, and set up remote sources.
+    ///
+    /// This wizard automates configuring cass to search across multiple machines.
+    /// It discovers SSH hosts from ~/.ssh/config, checks each for existing cass
+    /// installations and agent session data, then guides you through selecting
+    /// which machines to configure for remote search.
+    ///
+    /// # Workflow Phases
+    ///
+    /// 1. **Discovery**: Parses ~/.ssh/config to find configured hosts
+    /// 2. **Probing**: Connects to each host via SSH to check cass status and data
+    /// 3. **Selection**: Interactive selection of which hosts to configure
+    /// 4. **Installation**: Installs cass on hosts that don't have it (optional)
+    /// 5. **Indexing**: Runs `cass index` on remotes (optional)
+    /// 6. **Configuration**: Generates and saves sources.toml entries
+    /// 7. **Sync**: Downloads session data to local machine (optional)
+    ///
+    /// # Examples
+    ///
+    /// ```bash
+    /// # Interactive wizard (recommended for first-time setup)
+    /// cass sources setup
+    ///
+    /// # Configure specific hosts only
+    /// cass sources setup --hosts css,csd,yto
+    ///
+    /// # Preview without making changes
+    /// cass sources setup --dry-run
+    ///
+    /// # Resume an interrupted setup
+    /// cass sources setup --resume
+    ///
+    /// # Non-interactive for scripting (uses auto-detected defaults)
+    /// cass sources setup --non-interactive --hosts css,csd
+    ///
+    /// # Skip installation and indexing, just configure
+    /// cass sources setup --hosts css --skip-install --skip-index
+    ///
+    /// # JSON output for automation
+    /// cass sources setup --json --hosts css
+    /// ```
+    ///
+    /// # State and Resume
+    ///
+    /// If setup is interrupted (Ctrl+C, connection lost), state is saved to
+    /// `~/.config/cass/setup_state.json`. Resume with `cass sources setup --resume`.
+    ///
+    /// # See Also
+    ///
+    /// - `cass sources list` - List configured sources
+    /// - `cass sources sync` - Sync data from sources
+    /// - `cass sources discover` - Just discover hosts (no setup)
+    /// - `cass robot-docs sources` - Machine-readable sources documentation
     Setup {
         /// Preview what would happen without making changes
         #[arg(long)]
         dry_run: bool,
-        /// Skip interactive prompts (use defaults)
+        /// Skip interactive prompts (use auto-detected defaults for scripting)
         #[arg(long)]
         non_interactive: bool,
-        /// Specific hosts to configure (skips discovery/selection)
+        /// Configure only these hosts (comma-separated SSH aliases, skips discovery/selection)
         #[arg(long, value_delimiter = ',')]
         hosts: Option<Vec<String>>,
-        /// Skip cass installation on remotes
+        /// Skip cass installation on remotes that don't have it
         #[arg(long)]
         skip_install: bool,
-        /// Skip indexing on remotes
+        /// Skip running `cass index` on remotes
         #[arg(long)]
         skip_index: bool,
-        /// Skip syncing after setup
+        /// Skip syncing data after setup completes
         #[arg(long)]
         skip_sync: bool,
         /// SSH connection timeout in seconds
         #[arg(long, default_value = "10")]
         timeout: u64,
-        /// Continue from previous interrupted setup
+        /// Resume from previous interrupted setup (reads ~/.config/cass/setup_state.json)
         #[arg(long)]
         resume: bool,
         /// Show detailed progress output
         #[arg(long, short)]
         verbose: bool,
-        /// Output as JSON (implies non-interactive)
+        /// Output progress as JSON (implies non-interactive, for scripting)
         #[arg(long)]
         json: bool,
     },
@@ -670,6 +722,7 @@ pub enum RobotTopic {
     Examples,
     Contracts,
     Wrap,
+    Sources,
 }
 
 /// Output format for robot/automation mode
@@ -2386,7 +2439,7 @@ fn print_robot_help(wrap: WrapConfig) -> CliResult<()> {
         "  Use -v/--verbose with --json to enable INFO logs if needed",
         "",
         "Subcommands: search | stats | view | index | tui | robot-docs <topic>",
-        "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap",
+        "Topics: commands | env | paths | schemas | guide | exit-codes | examples | contracts | wrap | sources",
         "Exit codes: 0 ok; 2 usage; 3 missing index/db; 9 unknown",
         "More: cass robot-docs examples | cass robot-docs commands",
     ];
@@ -2524,6 +2577,81 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  Default: no forced wrap (wide output).".to_string(),
             "  --wrap <n>: wrap informational text to n columns.".to_string(),
             "  --nowrap: force no wrapping even if wrap set elsewhere.".to_string(),
+        ],
+        RobotTopic::Sources => vec![
+            "sources:".to_string(),
+            String::new(),
+            "# cass sources setup - Interactive Remote Sources Wizard".to_string(),
+            String::new(),
+            "## Overview".to_string(),
+            "The setup wizard automates configuring cass to search across multiple machines.".to_string(),
+            "It discovers SSH hosts from ~/.ssh/config, checks their status, and handles".to_string(),
+            "installation, indexing, and configuration automatically.".to_string(),
+            String::new(),
+            "## Quick Start".to_string(),
+            "  cass sources setup                    # Interactive (recommended)".to_string(),
+            "  cass sources setup --hosts css,csd    # Configure specific hosts".to_string(),
+            "  cass sources setup --dry-run          # Preview without changes".to_string(),
+            "  cass sources setup --resume           # Resume interrupted setup".to_string(),
+            String::new(),
+            "## Workflow Phases".to_string(),
+            "  1. Discovery  - Parses ~/.ssh/config to find configured hosts".to_string(),
+            "  2. Probing    - Connects via SSH to check cass status and agent data".to_string(),
+            "  3. Selection  - Interactive selection of which hosts to configure".to_string(),
+            "  4. Install    - Installs cass on hosts without it (optional)".to_string(),
+            "  5. Indexing   - Runs `cass index` on remotes (optional)".to_string(),
+            "  6. Config     - Generates sources.toml entries".to_string(),
+            "  7. Sync       - Downloads session data to local machine (optional)".to_string(),
+            String::new(),
+            "## Flags Reference".to_string(),
+            "  --hosts <names>      Only configure these hosts (comma-separated SSH aliases)".to_string(),
+            "  --dry-run            Preview without making changes".to_string(),
+            "  --resume             Resume from ~/.config/cass/setup_state.json".to_string(),
+            "  --non-interactive    Skip prompts, use auto-detected defaults".to_string(),
+            "  --skip-install       Don't install cass on remotes".to_string(),
+            "  --skip-index         Don't run remote indexing".to_string(),
+            "  --skip-sync          Don't sync after setup".to_string(),
+            "  --json               Output progress as JSON for scripting".to_string(),
+            "  --timeout <secs>     SSH connection timeout (default: 10)".to_string(),
+            "  --verbose            Show detailed progress".to_string(),
+            String::new(),
+            "## Non-Interactive Usage (Scripting)".to_string(),
+            "  cass sources setup --non-interactive --hosts css,csd".to_string(),
+            "  cass sources setup --non-interactive --hosts css --skip-install --skip-index".to_string(),
+            "  cass sources setup --json --hosts css  # JSON output for parsing".to_string(),
+            String::new(),
+            "## State and Resume".to_string(),
+            "State saved to ~/.config/cass/setup_state.json on interruption.".to_string(),
+            "Resume with: cass sources setup --resume".to_string(),
+            String::new(),
+            "## Generated Configuration".to_string(),
+            "The wizard generates sources.toml entries like:".to_string(),
+            "  [[sources]]".to_string(),
+            "  name = \"css\"".to_string(),
+            "  type = \"ssh\"".to_string(),
+            "  host = \"css\"".to_string(),
+            "  paths = [\"~/.claude/projects\", \"~/.codex/sessions\"]".to_string(),
+            "  sync_schedule = \"manual\"".to_string(),
+            "  [[sources.path_mappings]]".to_string(),
+            "  from = \"/data/projects\"".to_string(),
+            "  to = \"/Users/username/projects\"".to_string(),
+            String::new(),
+            "## After Setup".to_string(),
+            "  cass search \"query\"       # Search across all sources".to_string(),
+            "  cass sources sync --all   # Sync latest data".to_string(),
+            "  cass sources list         # List configured sources".to_string(),
+            String::new(),
+            "## Troubleshooting".to_string(),
+            "  \"Host unreachable\": Verify SSH config with `ssh <host>` manually".to_string(),
+            "  \"Permission denied\": Load SSH key with `ssh-add ~/.ssh/id_rsa`".to_string(),
+            "  \"cargo not found\": Use --skip-install and install manually".to_string(),
+            "  \"Index taking too long\": Large histories take time; runs in background".to_string(),
+            String::new(),
+            "## Related Commands".to_string(),
+            "  cass sources list         List configured sources".to_string(),
+            "  cass sources sync         Sync data from sources".to_string(),
+            "  cass sources discover     Just discover hosts (no setup)".to_string(),
+            "  cass sources add          Manually add a source".to_string(),
         ],
     };
 
@@ -8662,7 +8790,7 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
         println!("============================");
         println!();
         println!("Model:    {} ({})", manifest.id, manifest.license);
-        println!("Revision: {}", &manifest.revision[..12]);
+        println!("Revision: {}", manifest.revision.get(..12).unwrap_or(&manifest.revision));
         println!("Location: {}", model_dir.display());
         println!("Size:     {:.1} MB", total_size_mb);
         println!();

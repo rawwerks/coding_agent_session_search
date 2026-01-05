@@ -413,6 +413,77 @@ Returns in <50ms:
 | 8 | Partial result | Yes—increase timeout |
 | 9 | Unknown error | Maybe |
 
+### Multi-Machine Search Setup
+
+cass can search across agent sessions from multiple machines. Use the interactive setup wizard for the easiest configuration:
+
+```bash
+cass sources setup
+```
+
+#### What the wizard does:
+1. **Discovers** SSH hosts from your ~/.ssh/config
+2. **Probes** each host to check for:
+   - Existing cass installation (and version)
+   - Agent session data (Claude, Codex, Cursor, Gemini)
+   - System resources (disk, memory)
+3. **Lets you select** which hosts to configure
+4. **Installs cass** on remotes if needed
+5. **Indexes** existing sessions on remotes
+6. **Configures** sources.toml with correct paths
+7. **Syncs** data to your local machine
+
+#### For scripting (non-interactive):
+```bash
+cass sources setup --non-interactive --hosts css,csd,yto
+cass sources setup --json --hosts css  # JSON output for parsing
+```
+
+#### Key flags:
+| Flag | Purpose |
+|------|---------|
+| `--hosts <names>` | Configure only these hosts (comma-separated) |
+| `--dry-run` | Preview without making changes |
+| `--resume` | Resume interrupted setup |
+| `--skip-install` | Don't install cass on remotes |
+| `--skip-index` | Don't run remote indexing |
+| `--skip-sync` | Don't sync after setup |
+| `--json` | Output progress as JSON |
+
+#### After setup:
+```bash
+# Search across all sources
+cass search "database migration"
+
+# Sync latest data
+cass sources sync --all
+
+# List configured sources
+cass sources list
+```
+
+#### Manual configuration:
+If you prefer manual setup, edit `~/.config/cass/sources.toml`:
+```toml
+[[sources]]
+name = "my-server"
+type = "ssh"
+host = "user@server.example.com"
+paths = ["~/.claude/projects"]
+
+[[sources.path_mappings]]
+from = "/home/user/projects"
+to = "/Users/me/projects"
+```
+
+#### Troubleshooting:
+- **Host unreachable**: Verify SSH config with `ssh <host>` manually
+- **Permission denied**: Load SSH key with `ssh-add ~/.ssh/id_rsa`
+- **cargo not found**: Use `--skip-install` and install manually
+- **Interrupted setup**: Resume with `cass sources setup --resume`
+
+For machine-readable docs: `cass robot-docs sources`
+
 ---
 
 ## UBS — Ultimate Bug Scanner
