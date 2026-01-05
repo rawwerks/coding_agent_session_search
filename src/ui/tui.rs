@@ -1929,31 +1929,8 @@ fn initialize_semantic_context(
 }
 
 fn semantic_unavailable_message(availability: &SemanticAvailability) -> String {
-    match availability {
-        SemanticAvailability::ModelMissing { missing_files, .. } => {
-            if missing_files.is_empty() {
-                "model files missing".to_string()
-            } else {
-                format!("missing {}", missing_files.join(", "))
-            }
-        }
-        SemanticAvailability::IndexMissing { index_path } => {
-            format!("index missing at {}", index_path.display())
-        }
-        SemanticAvailability::DatabaseUnavailable { error, .. } => {
-            format!("db unavailable ({error})")
-        }
-        SemanticAvailability::LoadFailed { context } => context.clone(),
-        SemanticAvailability::Ready { .. } => "ready".to_string(),
-        SemanticAvailability::UpdateAvailable {
-            current_revision,
-            latest_revision,
-            ..
-        } => format!("update available: {current_revision} -> {latest_revision}"),
-        SemanticAvailability::IndexBuilding { embedder_id } => {
-            format!("rebuilding index for {embedder_id}")
-        }
-    }
+    // Use the built-in summary method which handles all variants
+    availability.summary()
 }
 
 use crate::ui::components::breadcrumbs::{self, BreadcrumbKind};

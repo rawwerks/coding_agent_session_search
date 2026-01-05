@@ -21,43 +21,98 @@ use crate::search::vector_index::{
 };
 use crate::storage::sqlite::SqliteStorage;
 
+/// Unified TUI state machine for semantic search availability.
+///
+/// This enum tracks the full lifecycle of semantic search from the user's perspective:
+/// - Model installation flow (NotInstalled → NeedsConsent → Downloading → Verifying → Ready)
+/// - Index building flow (Ready → IndexBuilding → Ready)
+/// - User preferences (HashFallback, Disabled)
+/// - Error states (LoadFailed, ModelMissing, etc.)
 #[derive(Debug, Clone)]
 pub enum SemanticAvailability {
     /// Model is ready for use.
     Ready {
         embedder_id: String,
     },
+
+    // =========================================================================
+    // TUI-centric states for user flow
+    // =========================================================================
+    /// Model not installed - semantic not available.
+    /// TUI should show option to download or use hash fallback.
+    NotInstalled,
+
+    /// User needs to consent before downloading model.
+    /// TUI should show consent dialog.
+    NeedsConsent,
+
+    /// Model download in progress.
+    Downloading {
+        /// Progress percentage (0-100).
+        progress_pct: u8,
+        /// Bytes downloaded so far.
+        bytes_downloaded: u64,
+        /// Total bytes to download.
+        total_bytes: u64,
+    },
+
+    /// Verifying downloaded model (SHA256 check).
+    Verifying,
+
+    /// Index is being built or rebuilt.
+    IndexBuilding {
+        embedder_id: String,
+        /// Optional progress percentage (0-100).
+        progress_pct: Option<u8>,
+        /// Number of items indexed so far.
+        items_indexed: u64,
+        /// Total items to index.
+        total_items: u64,
+    },
+
+    /// User opted for hash-based fallback (no ML model).
+    HashFallback,
+
+    /// Semantic search disabled by policy or user.
+    Disabled {
+        reason: String,
+    },
+
+    // =========================================================================
+    // Diagnostic states for troubleshooting
+    // =========================================================================
     /// Model files are missing.
     ModelMissing {
         model_dir: PathBuf,
         missing_files: Vec<String>,
     },
+
     /// Vector index is missing.
     IndexMissing {
         index_path: PathBuf,
     },
+
     /// Database is unavailable.
     DatabaseUnavailable {
         db_path: PathBuf,
         error: String,
     },
+
     /// Failed to load semantic context.
     LoadFailed {
         context: String,
     },
+
     /// Model update available - index rebuild needed.
     UpdateAvailable {
         embedder_id: String,
         current_revision: String,
         latest_revision: String,
     },
-    /// Index is being rebuilt after model upgrade.
-    IndexBuilding {
-        embedder_id: String,
-    },
 }
 
 impl SemanticAvailability {
+    /// Check if semantic search is ready to use.
     pub fn is_ready(&self) -> bool {
         matches!(self, SemanticAvailability::Ready { .. })
     }
@@ -72,10 +127,130 @@ impl SemanticAvailability {
         matches!(self, SemanticAvailability::IndexBuilding { .. })
     }
 
+    /// Check if a download is in progress.
+    pub fn is_downloading(&self) -> bool {
+        matches!(self, SemanticAvailability::Downloading { .. })
+    }
+
+    /// Check if user consent is needed.
+    pub fn needs_consent(&self) -> bool {
+        matches!(self, SemanticAvailability::NeedsConsent)
+    }
+
+    /// Check if hash fallback is active.
+    pub fn is_hash_fallback(&self) -> bool {
+        matches!(self, SemanticAvailability::HashFallback)
+    }
+
+    /// Check if semantic search is disabled.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, SemanticAvailability::Disabled { .. })
+    }
+
+    /// Check if the model is not installed.
+    pub fn is_not_installed(&self) -> bool {
+        matches!(
+            self,
+            SemanticAvailability::NotInstalled | SemanticAvailability::ModelMissing { .. }
+        )
+    }
+
+    /// Check if any error state is active.
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            SemanticAvailability::LoadFailed { .. }
+                | SemanticAvailability::DatabaseUnavailable { .. }
+        )
+    }
+
+    /// Check if semantic can be used (ready or hash fallback).
+    pub fn can_search(&self) -> bool {
+        matches!(
+            self,
+            SemanticAvailability::Ready { .. } | SemanticAvailability::HashFallback
+        )
+    }
+
+    /// Get download progress if downloading.
+    pub fn download_progress(&self) -> Option<(u8, u64, u64)> {
+        match self {
+            SemanticAvailability::Downloading {
+                progress_pct,
+                bytes_downloaded,
+                total_bytes,
+            } => Some((*progress_pct, *bytes_downloaded, *total_bytes)),
+            _ => None,
+        }
+    }
+
+    /// Get index building progress if building.
+    pub fn index_progress(&self) -> Option<(Option<u8>, u64, u64)> {
+        match self {
+            SemanticAvailability::IndexBuilding {
+                progress_pct,
+                items_indexed,
+                total_items,
+                ..
+            } => Some((*progress_pct, *items_indexed, *total_items)),
+            _ => None,
+        }
+    }
+
+    /// Get a short status label for display in status bar.
+    pub fn status_label(&self) -> &'static str {
+        match self {
+            SemanticAvailability::Ready { .. } => "SEM",
+            SemanticAvailability::HashFallback => "SEM*",
+            SemanticAvailability::NotInstalled => "LEX",
+            SemanticAvailability::NeedsConsent => "LEX",
+            SemanticAvailability::Downloading { .. } => "DL...",
+            SemanticAvailability::Verifying => "VFY...",
+            SemanticAvailability::IndexBuilding { .. } => "IDX...",
+            SemanticAvailability::Disabled { .. } => "OFF",
+            SemanticAvailability::ModelMissing { .. } => "ERR",
+            SemanticAvailability::IndexMissing { .. } => "NOIDX",
+            SemanticAvailability::DatabaseUnavailable { .. } => "NODB",
+            SemanticAvailability::LoadFailed { .. } => "ERR",
+            SemanticAvailability::UpdateAvailable { .. } => "UPD",
+        }
+    }
+
+    /// Get a detailed summary for display.
     pub fn summary(&self) -> String {
         match self {
             SemanticAvailability::Ready { embedder_id } => {
                 format!("semantic ready ({embedder_id})")
+            }
+            SemanticAvailability::NotInstalled => "model not installed".to_string(),
+            SemanticAvailability::NeedsConsent => "consent required for model download".to_string(),
+            SemanticAvailability::Downloading {
+                progress_pct,
+                bytes_downloaded,
+                total_bytes,
+            } => {
+                let mb_done = *bytes_downloaded as f64 / 1_048_576.0;
+                let mb_total = *total_bytes as f64 / 1_048_576.0;
+                format!(
+                    "downloading model: {progress_pct}% ({mb_done:.1}/{mb_total:.1} MB)"
+                )
+            }
+            SemanticAvailability::Verifying => "verifying model checksum".to_string(),
+            SemanticAvailability::IndexBuilding {
+                items_indexed,
+                total_items,
+                progress_pct,
+                ..
+            } => {
+                if let Some(pct) = progress_pct {
+                    format!("building index: {pct}% ({items_indexed}/{total_items})")
+                } else {
+                    format!("building index: {items_indexed}/{total_items}")
+                }
+            }
+            SemanticAvailability::HashFallback => "using hash-based fallback".to_string(),
+            SemanticAvailability::Disabled { reason } => {
+                format!("semantic disabled: {reason}")
             }
             SemanticAvailability::ModelMissing { model_dir, .. } => {
                 format!("model missing at {}", model_dir.display())
@@ -95,9 +270,6 @@ impl SemanticAvailability {
                 ..
             } => {
                 format!("update available: {current_revision} -> {latest_revision}")
-            }
-            SemanticAvailability::IndexBuilding { embedder_id } => {
-                format!("rebuilding index for {embedder_id}")
             }
         }
     }
@@ -311,14 +483,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_semantic_availability_summary() {
+    fn test_semantic_availability_ready() {
         let ready = SemanticAvailability::Ready {
             embedder_id: "test-123".into(),
         };
         assert!(ready.summary().contains("semantic ready"));
         assert!(ready.is_ready());
         assert!(!ready.has_update());
+        assert!(ready.can_search());
+        assert_eq!(ready.status_label(), "SEM");
+    }
 
+    #[test]
+    fn test_semantic_availability_update() {
         let update = SemanticAvailability::UpdateAvailable {
             embedder_id: "test".into(),
             current_revision: "v1".into(),
@@ -327,12 +504,87 @@ mod tests {
         assert!(update.summary().contains("update available"));
         assert!(!update.is_ready());
         assert!(update.has_update());
+        assert_eq!(update.status_label(), "UPD");
+    }
 
+    #[test]
+    fn test_semantic_availability_index_building() {
         let building = SemanticAvailability::IndexBuilding {
             embedder_id: "test".into(),
+            progress_pct: Some(45),
+            items_indexed: 100,
+            total_items: 200,
         };
-        assert!(building.summary().contains("rebuilding"));
+        assert!(building.summary().contains("building index"));
+        assert!(building.summary().contains("45%"));
         assert!(building.is_building());
+        assert_eq!(building.status_label(), "IDX...");
+
+        let (pct, done, total) = building.index_progress().unwrap();
+        assert_eq!(pct, Some(45));
+        assert_eq!(done, 100);
+        assert_eq!(total, 200);
+    }
+
+    #[test]
+    fn test_semantic_availability_downloading() {
+        let downloading = SemanticAvailability::Downloading {
+            progress_pct: 50,
+            bytes_downloaded: 10_000_000,
+            total_bytes: 20_000_000,
+        };
+        assert!(downloading.is_downloading());
+        assert!(downloading.summary().contains("downloading"));
+        assert!(downloading.summary().contains("50%"));
+        assert_eq!(downloading.status_label(), "DL...");
+
+        let (pct, bytes, total) = downloading.download_progress().unwrap();
+        assert_eq!(pct, 50);
+        assert_eq!(bytes, 10_000_000);
+        assert_eq!(total, 20_000_000);
+    }
+
+    #[test]
+    fn test_semantic_availability_tui_states() {
+        let not_installed = SemanticAvailability::NotInstalled;
+        assert!(not_installed.is_not_installed());
+        assert_eq!(not_installed.status_label(), "LEX");
+
+        let needs_consent = SemanticAvailability::NeedsConsent;
+        assert!(needs_consent.needs_consent());
+        assert_eq!(needs_consent.status_label(), "LEX");
+
+        let verifying = SemanticAvailability::Verifying;
+        assert!(verifying.summary().contains("verifying"));
+        assert_eq!(verifying.status_label(), "VFY...");
+
+        let hash_fallback = SemanticAvailability::HashFallback;
+        assert!(hash_fallback.is_hash_fallback());
+        assert!(hash_fallback.can_search());
+        assert_eq!(hash_fallback.status_label(), "SEM*");
+
+        let disabled = SemanticAvailability::Disabled {
+            reason: "offline mode".into(),
+        };
+        assert!(disabled.is_disabled());
+        assert!(disabled.summary().contains("offline"));
+        assert_eq!(disabled.status_label(), "OFF");
+    }
+
+    #[test]
+    fn test_semantic_availability_error_states() {
+        let load_failed = SemanticAvailability::LoadFailed {
+            context: "test error".into(),
+        };
+        assert!(load_failed.is_error());
+        assert_eq!(load_failed.status_label(), "ERR");
+
+        let db_unavail = SemanticAvailability::DatabaseUnavailable {
+            db_path: PathBuf::from("/test"),
+            error: "locked".into(),
+        };
+        assert!(db_unavail.is_error());
+        assert_eq!(db_unavail.status_label(), "NODB");
     }
 
     #[test]
