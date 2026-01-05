@@ -69,6 +69,7 @@
 //! ```
 
 pub mod config;
+pub mod install;
 pub mod probe;
 pub mod provenance;
 pub mod sync;
@@ -92,4 +93,9 @@ pub use sync::{
 pub use probe::{
     CassStatus, DetectedAgent, HostProbeResult, ProbeCache, ResourceInfo, SystemInfo, probe_host,
     probe_hosts_parallel,
+};
+
+// Re-export commonly used install types
+pub use install::{
+    InstallError, InstallMethod, InstallProgress, InstallResult, InstallStage, RemoteInstaller,
 };

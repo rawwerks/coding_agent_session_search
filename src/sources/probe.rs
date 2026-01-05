@@ -550,8 +550,8 @@ where
     F: Fn(usize, usize, &str) + Send + Sync,
 {
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let total = hosts.len();
     let completed = Arc::new(AtomicUsize::new(0));
