@@ -689,7 +689,8 @@ mod tests {
         assert!(formatted.contains("10.0.0.1"));
         assert!(formatted.contains("testuser"));
         assert!(formatted.contains("cass not installed"));
-        assert!(formatted.contains("claude"));
+        // Agent names are capitalized for display (claude -> Claude)
+        assert!(formatted.contains("Claude"));
         // Should contain status badge
         assert!(formatted.contains("Needs install"));
     }
