@@ -54,8 +54,8 @@ jobs:
         run: |
           CHANGED=$(git diff --name-only origin/main...HEAD | tr '\n' ' ')
           if [ -n "$CHANGED" ]; then ./ubs $CHANGED; fi
-      - name: ratatui snapshot + hotkey tests
-        run: cargo test --tests -- ui_
+      # Note: ui_ tests are already run by nextest with proper serialization
+      # (configured in .config/nextest.toml with threads-required)
 
   e2e:
     runs-on: ubuntu-latest
@@ -109,18 +109,23 @@ jobs:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage report
+      - name: Run tests with coverage
         run: |
+          # Run tests ONCE with coverage instrumentation (no report yet)
           cargo llvm-cov --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --lcov --output-path lcov.info \
+            --no-report \
             -- --skip install_sh --skip install_ps1
-      - name: Generate coverage summary
+      - name: Generate coverage reports
         run: |
-          cargo llvm-cov --all-features --workspace \
+          # Generate LCOV from collected data (no re-running tests)
+          cargo llvm-cov report --all-features --workspace \
             --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --text \
-            -- --skip install_sh --skip install_ps1 > coverage-summary.txt
+            --lcov --output-path lcov.info
+          # Generate text summary from collected data
+          cargo llvm-cov report --all-features --workspace \
+            --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
+            --text > coverage-summary.txt
           echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           tail -20 coverage-summary.txt >> $GITHUB_STEP_SUMMARY
