@@ -1283,9 +1283,56 @@ fn f16_as_bytes(values: &[f16]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 2) }
 }
 
+/// Scalar dot product (fallback when SIMD is disabled).
+#[inline]
+fn dot_product_scalar(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// P0 Opt 2: SIMD dot product using wide crate.
+/// Processes 8 floats per iteration using AVX2/SSE on x86_64 or NEON on ARM.
+/// Note: SIMD reorders FP operations, causing ~1e-7 relative error vs scalar.
+/// This is acceptable as it doesn't change ranking order.
+#[inline]
+fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
+    use wide::f32x8;
+
+    let chunks_a = a.chunks_exact(8);
+    let chunks_b = b.chunks_exact(8);
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    let mut sum = f32x8::ZERO;
+    for (ca, cb) in chunks_a.zip(chunks_b) {
+        // SAFETY: chunks_exact guarantees exactly 8 elements.
+        let arr_a: [f32; 8] = ca.try_into().unwrap();
+        let arr_b: [f32; 8] = cb.try_into().unwrap();
+        sum += f32x8::from(arr_a) * f32x8::from(arr_b);
+    }
+
+    let mut scalar_sum: f32 = sum.reduce_add();
+    for (a, b) in remainder_a.iter().zip(remainder_b) {
+        scalar_sum += a * b;
+    }
+    scalar_sum
+}
+
+/// Cached SIMD enable flag (checked once at first use).
+static SIMD_DOT_ENABLED: once_cell::sync::Lazy<bool> = once_cell::sync::Lazy::new(|| {
+    dotenvy::var("CASS_SIMD_DOT")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true)
+});
+
+/// Dispatches to SIMD or scalar dot product based on CASS_SIMD_DOT env var.
+/// Default: SIMD enabled. Set CASS_SIMD_DOT=0 to disable.
 #[inline]
 fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    if *SIMD_DOT_ENABLED {
+        dot_product_simd(a, b)
+    } else {
+        dot_product_scalar(a, b)
+    }
 }
 
 #[inline]
@@ -1625,5 +1672,57 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn simd_dot_product_matches_scalar_within_tolerance() {
+        // P0 Opt 2: Verify SIMD dot product matches scalar within acceptable FP tolerance.
+        // SIMD reorders operations, causing ~1e-7 relative error, which is acceptable.
+
+        // Test with various vector sizes (including those that aren't multiples of 8).
+        let test_sizes = [3, 8, 16, 100, 384, 385, 1000];
+
+        for size in test_sizes {
+            let a: Vec<f32> = (0..size).map(|i| (i as f32) * 0.001).collect();
+            let b: Vec<f32> = (0..size).map(|i| ((size - i) as f32) * 0.001).collect();
+
+            let scalar = dot_product_scalar(&a, &b);
+            let simd = dot_product_simd(&a, &b);
+
+            let abs_err = (scalar - simd).abs();
+            let rel_err = abs_err / scalar.abs().max(1e-10);
+
+            assert!(
+                rel_err < 1e-5,
+                "SIMD dot product differs too much from scalar for size {}: scalar={}, simd={}, rel_err={}",
+                size,
+                scalar,
+                simd,
+                rel_err
+            );
+        }
+    }
+
+    #[test]
+    fn simd_dot_product_handles_edge_cases() {
+        // Test empty vectors.
+        let empty: Vec<f32> = vec![];
+        assert_eq!(dot_product_simd(&empty, &empty), 0.0);
+
+        // Test single element.
+        let single = vec![2.0];
+        assert!((dot_product_simd(&single, &single) - 4.0).abs() < 1e-6);
+
+        // Test 7 elements (less than one SIMD chunk).
+        let seven: Vec<f32> = vec![1.0; 7];
+        assert!((dot_product_simd(&seven, &seven) - 7.0).abs() < 1e-6);
+
+        // Test exactly 8 elements (one SIMD chunk).
+        let eight: Vec<f32> = vec![1.0; 8];
+        assert!((dot_product_simd(&eight, &eight) - 8.0).abs() < 1e-6);
+
+        // Test 9 elements (one SIMD chunk + remainder).
+        let nine: Vec<f32> = vec![1.0; 9];
+        assert!((dot_product_simd(&nine, &nine) - 9.0).abs() < 1e-6);
     }
 }

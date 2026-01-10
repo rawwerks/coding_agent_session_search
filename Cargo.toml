@@ -55,6 +55,7 @@ urlencoding = "*"
 half = "*"
 memmap2 = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries"] }
+wide = "0.7"  # Portable SIMD for P0 Opt 2: SIMD dot product
 
 # Crypto for ChatGPT encrypted conversations
 aes-gcm = "0.10"
