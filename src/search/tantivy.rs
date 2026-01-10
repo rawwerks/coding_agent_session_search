@@ -277,10 +277,22 @@ impl TantivyIndex {
             .and_then(|o| o.get("host"))
             .and_then(|v| v.as_str());
 
+        // Precompute per-conversation fields once (indexing hot path).
+        let source_path = conv.source_path.to_string_lossy();
+        let workspace = conv.workspace.as_ref().map(|ws| ws.to_string_lossy());
+        let workspace_original = conv
+            .metadata
+            .get("cass")
+            .and_then(|c| c.get("workspace_original"))
+            .and_then(|v| v.as_str());
+        let title = conv.title.as_deref();
+        let title_prefix = title.map(generate_edge_ngrams);
+        let started_at_fallback = conv.started_at;
+
         for msg in messages {
             let mut d = doc! {
                 self.fields.agent => conv.agent_slug.clone(),
-                self.fields.source_path => conv.source_path.to_string_lossy().into_owned(),
+                self.fields.source_path => source_path.as_ref(),
                 self.fields.msg_idx => msg.idx as u64,
                 self.fields.content => msg.content.clone(),
                 self.fields.source_id => source_id,
@@ -291,24 +303,21 @@ impl TantivyIndex {
             {
                 d.add_text(self.fields.origin_host, host);
             }
-            if let Some(ws) = &conv.workspace {
-                d.add_text(self.fields.workspace, ws.to_string_lossy());
+            if let Some(ws) = &workspace {
+                d.add_text(self.fields.workspace, ws.as_ref());
             }
             // workspace_original from metadata.cass.workspace_original (P6.2)
-            if let Some(ws_orig) = conv
-                .metadata
-                .get("cass")
-                .and_then(|c| c.get("workspace_original"))
-                .and_then(|v| v.as_str())
-            {
+            if let Some(ws_orig) = workspace_original {
                 d.add_text(self.fields.workspace_original, ws_orig);
             }
-            if let Some(ts) = msg.created_at.or(conv.started_at) {
+            if let Some(ts) = msg.created_at.or(started_at_fallback) {
                 d.add_i64(self.fields.created_at, ts);
             }
-            if let Some(title) = &conv.title {
+            if let Some(title) = title {
                 d.add_text(self.fields.title, title);
-                d.add_text(self.fields.title_prefix, generate_edge_ngrams(title));
+                if let Some(title_prefix) = &title_prefix {
+                    d.add_text(self.fields.title_prefix, title_prefix);
+                }
             }
             d.add_text(
                 self.fields.content_prefix,
@@ -770,6 +779,65 @@ mod tests {
         assert!(result.contains("he"));
         assert!(result.contains("wo"));
         assert!(result.contains("world"));
+    }
+
+    #[test]
+    fn title_prefix_ngrams_are_reused_for_each_message_doc() {
+        use crate::connectors::{NormalizedConversation, NormalizedMessage};
+        use crate::search::query::{SearchClient, SearchFilters};
+
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path();
+
+        let mut index = TantivyIndex::open_or_create(index_path).unwrap();
+
+        // Title contains "unique..." but message contents do not.
+        // Searching for a short prefix ("un") should match via `title_prefix`,
+        // and therefore return *every* message document in the conversation.
+        let conv = NormalizedConversation {
+            agent_slug: "bench-agent".into(),
+            external_id: Some("conv-1".into()),
+            title: Some("UniqueTitleToken".into()),
+            workspace: None,
+            source_path: "/tmp/bench/conv-1.jsonl".into(),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_001),
+            metadata: serde_json::json!({}),
+            messages: vec![
+                NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: None,
+                    created_at: Some(1_700_000_000_000),
+                    content: "first message content".into(),
+                    extra: serde_json::json!({}),
+                    snippets: Vec::new(),
+                },
+                NormalizedMessage {
+                    idx: 1,
+                    role: "agent".into(),
+                    author: None,
+                    created_at: Some(1_700_000_000_001),
+                    content: "second message content".into(),
+                    extra: serde_json::json!({}),
+                    snippets: Vec::new(),
+                },
+            ],
+        };
+
+        index.add_messages(&conv, &conv.messages).unwrap();
+        index.commit().unwrap();
+
+        let client = SearchClient::open(index_path, None).unwrap().unwrap();
+        let hits = client
+            .search("un", SearchFilters::default(), 10, 0)
+            .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            2,
+            "Expected both message docs to match via title_prefix ngrams"
+        );
     }
 
     #[test]

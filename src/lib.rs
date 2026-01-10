@@ -3693,6 +3693,21 @@ fn output_robot_results(
     timeout_ms: Option<u64>,
     search_mode: crate::search::query::SearchMode,
 ) -> CliResult<()> {
+    if matches!(format, RobotFormat::Sessions) {
+        // Output unique session paths only, one per line.
+        // This format is designed for chained searches via --sessions-from.
+        use std::collections::BTreeSet;
+        let paths: BTreeSet<&str> = result
+            .hits
+            .iter()
+            .map(|hit| hit.source_path.as_str())
+            .collect();
+        for path in paths {
+            println!("{path}");
+        }
+        return Ok(());
+    }
+
     // Expand presets (minimal, summary, provenance, all, *)
     let resolved_fields = expand_field_presets(fields);
 
@@ -4022,17 +4037,7 @@ fn output_robot_results(
             println!("{out}");
         }
         RobotFormat::Sessions => {
-            // Output unique session paths only, one per line
-            // This format is designed for chained searches via --sessions-from
-            use std::collections::BTreeSet;
-            let paths: BTreeSet<&str> = result
-                .hits
-                .iter()
-                .map(|hit| hit.source_path.as_str())
-                .collect();
-            for path in paths {
-                println!("{}", path);
-            }
+            unreachable!("RobotFormat::Sessions is handled above to avoid building hit payloads");
         }
     }
 

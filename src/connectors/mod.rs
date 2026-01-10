@@ -240,7 +240,11 @@ pub fn file_modified_since(path: &std::path::Path, since_ts: Option<i64>) -> boo
 pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
     // Try direct i64 first (legacy format)
     if let Some(ts) = val.as_i64() {
-        let ts = if ts < 10_000_000_000 {
+        // Heuristic:
+        // - Values in the typical Unix-seconds range (>= 1e9 and < 1e10) are treated as seconds
+        //   and converted to millis.
+        // - Negative values are treated as millis (ambiguous, but preserves pre-1970 ms inputs).
+        let ts = if (1_000_000_000..10_000_000_000).contains(&ts) {
             ts.saturating_mul(1000)
         } else {
             ts
@@ -251,7 +255,7 @@ pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
     if let Some(s) = val.as_str() {
         // Numeric strings (seconds or milliseconds)
         if let Ok(num) = s.parse::<i64>() {
-            let ts = if num < 10_000_000_000 {
+            let ts = if (1_000_000_000..10_000_000_000).contains(&num) {
                 num.saturating_mul(1000)
             } else {
                 num
@@ -259,7 +263,7 @@ pub fn parse_timestamp(val: &serde_json::Value) -> Option<i64> {
             return Some(ts);
         }
         if let Ok(num) = s.parse::<f64>() {
-            let ts = if num < 10_000_000_000.0 {
+            let ts = if (1_000_000_000.0..10_000_000_000.0).contains(&num) {
                 (num * 1000.0).round() as i64
             } else {
                 num.round() as i64

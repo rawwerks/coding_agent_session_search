@@ -331,6 +331,66 @@ fn search_cursor_jsonl_and_compact() {
 }
 
 #[test]
+fn search_robot_format_sessions_matches_source_paths() {
+    // rob.ctx.sessions: sessions output should match the unique sorted source_path set from JSON hits.
+    let data_dir = "tests/fixtures/search_demo_data";
+
+    // 1) Get source_path values via compact JSON.
+    let mut compact = base_cmd();
+    compact.args([
+        "search",
+        "hello",
+        "--robot-format",
+        "compact",
+        "--fields",
+        "minimal",
+        "--limit",
+        "50",
+        "--data-dir",
+        data_dir,
+    ]);
+    let compact_out = compact.assert().success().get_output().clone();
+    let json: Value = serde_json::from_slice(&compact_out.stdout).expect("compact json payload");
+    let hits = json["hits"].as_array().expect("hits array");
+
+    let mut expected: Vec<String> = hits
+        .iter()
+        .filter_map(|h| {
+            h.get("source_path")
+                .and_then(|p| p.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    expected.sort();
+    expected.dedup();
+
+    // 2) Get session paths via sessions robot format.
+    let mut sessions = base_cmd();
+    sessions.args([
+        "search",
+        "hello",
+        "--robot-format",
+        "sessions",
+        "--limit",
+        "50",
+        "--data-dir",
+        data_dir,
+    ]);
+    let sessions_out = sessions.assert().success().get_output().clone();
+    let actual: Vec<String> = String::from_utf8_lossy(&sessions_out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        actual, expected,
+        "sessions output should equal unique sorted hit source_path values"
+    );
+}
+
+#[test]
 fn robot_docs_schemas_topic() {
     let mut cmd = base_cmd();
     cmd.args(["robot-docs", "schemas"]);

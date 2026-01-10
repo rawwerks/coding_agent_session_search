@@ -524,6 +524,10 @@ pub struct VectorIndex {
 enum VectorStorage {
     F32(Vec<f32>),
     F16(Vec<f16>),
+    /// P0 Opt 1: F32 data pre-converted from F16 at load time.
+    /// The vec_offset values are still in F16 byte terms (2 bytes per component),
+    /// so we use 2 as the divisor when computing element indices.
+    PreconvertedF32(Vec<f32>),
     Mmap {
         mmap: Mmap,
         offset: usize,
@@ -697,14 +701,36 @@ impl VectorIndex {
             slab_size,
         )?;
 
-        let index = Self {
-            header,
-            rows,
-            vectors: VectorStorage::Mmap {
+        // P0 Opt 1: Pre-convert F16→F32 at load time to eliminate per-query conversion.
+        // Env var CASS_F16_PRECONVERT=0 disables this (keeps mmap + lazy conversion).
+        let f16_preconvert_enabled = dotenvy::var("CASS_F16_PRECONVERT")
+            .map(|v| v != "0" && v.to_lowercase() != "false")
+            .unwrap_or(true);
+
+        let vectors = if f16_preconvert_enabled && header.quantization == Quantization::F16 {
+            // Pre-convert entire F16 slab to F32 for faster dot products.
+            // Trade-off: 2x memory usage, but eliminates 19.2M conversions/query for 50k vectors.
+            let slab_end = slab_offset
+                .checked_add(slab_size)
+                .ok_or_else(|| anyhow!("slab offset overflow"))?;
+            let slab_bytes = mmap
+                .get(slab_offset..slab_end)
+                .ok_or_else(|| anyhow!("slab out of bounds"))?;
+            let f16_slice = bytes_as_f16(slab_bytes)?;
+            let f32_slab: Vec<f32> = f16_slice.iter().map(|v| f32::from(*v)).collect();
+            VectorStorage::PreconvertedF32(f32_slab)
+        } else {
+            VectorStorage::Mmap {
                 mmap,
                 offset: slab_offset,
                 len: slab_size,
-            },
+            }
+        };
+
+        let index = Self {
+            header,
+            rows,
+            vectors,
         };
         index.validate()?;
         Ok(index)
@@ -878,6 +904,17 @@ impl VectorIndex {
                     .ok_or_else(|| anyhow!("vector slice out of bounds"))?;
                 Ok(slice.iter().map(|v| f32::from(*v)).collect())
             }
+            VectorStorage::PreconvertedF32(values) => {
+                // P0 Opt 1: Pre-converted from F16, vec_offset is in F16 byte terms.
+                let start = vector_offset_to_index(row.vec_offset, 2)?;
+                let end = start
+                    .checked_add(dimension)
+                    .ok_or_else(|| anyhow!("vector slice overflow"))?;
+                let slice = values
+                    .get(start..end)
+                    .ok_or_else(|| anyhow!("vector slice out of bounds"))?;
+                Ok(slice.to_vec())
+            }
             VectorStorage::Mmap { mmap, offset, .. } => {
                 let bytes_per = self.header.quantization.bytes_per_component();
                 let base = offset
@@ -963,6 +1000,12 @@ impl VectorIndex {
                 let bytes = f16_as_bytes(values);
                 writer.write_all(bytes)?;
             }
+            VectorStorage::PreconvertedF32(values) => {
+                // P0 Opt 1: Convert back to F16 for storage (header.quantization == F16).
+                let f16_slab: Vec<f16> = values.iter().map(|v| f16::from_f32(*v)).collect();
+                let bytes = f16_as_bytes(&f16_slab);
+                writer.write_all(bytes)?;
+            }
             VectorStorage::Mmap { mmap, offset, len } => {
                 let bytes = mmap
                     .get(*offset..offset + len)
@@ -994,6 +1037,18 @@ impl VectorIndex {
                     .get(start..end)
                     .ok_or_else(|| anyhow!("vector slice out of bounds"))?;
                 Ok(dot_product_f16(slice, query))
+            }
+            VectorStorage::PreconvertedF32(values) => {
+                // P0 Opt 1: Pre-converted from F16, so vec_offset is still in F16 byte terms.
+                // Use 2 as divisor (F16 bytes per component) to get element index.
+                let start = vector_offset_to_index(vec_offset, 2)?;
+                let end = start
+                    .checked_add(query.len())
+                    .ok_or_else(|| anyhow!("vector slice overflow"))?;
+                let slice = values
+                    .get(start..end)
+                    .ok_or_else(|| anyhow!("vector slice out of bounds"))?;
+                Ok(dot_product(slice, query))
             }
             VectorStorage::Mmap { mmap, offset, len } => {
                 let bytes_per = self.header.quantization.bytes_per_component();
@@ -1140,6 +1195,17 @@ impl VectorStorage {
                 values
                     .len()
                     .checked_mul(2)
+                    .ok_or_else(|| anyhow!("vector slab size overflow"))
+            }
+            VectorStorage::PreconvertedF32(values) => {
+                // P0 Opt 1: Pre-converted from F16, header.quantization is F16.
+                // Return the equivalent F16 byte size for validation.
+                if quantization != Quantization::F16 {
+                    bail!("vector storage quantization mismatch (expected f16 for preconverted)");
+                }
+                values
+                    .len()
+                    .checked_mul(2) // Each F32 element represents one F16 value
                     .ok_or_else(|| anyhow!("vector slab size overflow"))
             }
             VectorStorage::Mmap { len, .. } => Ok(*len),
@@ -1501,6 +1567,62 @@ mod tests {
         };
         let results = index.search_top_k(&[0.5, 0.5, 0.0], 5, Some(&filter))?;
         assert_eq!(results.len(), 3);
+
+        Ok(())
+    }
+
+    #[test]
+    fn f16_preconvert_load_produces_same_search_results() -> Result<()> {
+        // P0 Opt 1: Test that F16 pre-conversion at load time produces identical results.
+        // Build an F16 index, save it, load it (with pre-conversion), and verify search results match.
+        let entries = sample_entries();
+        let index = VectorIndex::build("hash-3", "rev", 3, Quantization::F16, entries.clone())?;
+        let dir = tempdir()?;
+        let path = dir.path().join("index.cvvi");
+        index.save(&path)?;
+
+        // Load the index (default: F16 pre-conversion enabled).
+        let loaded = VectorIndex::load(&path)?;
+
+        // Verify header is preserved.
+        assert_eq!(loaded.header().quantization, Quantization::F16);
+        assert_eq!(loaded.header().count, index.header().count);
+        assert_eq!(loaded.header().dimension, index.header().dimension);
+
+        // Verify search produces same ranking as original.
+        let query = [0.9, 0.1, -0.2];
+        let original_results = index.search_top_k(&query, 3, None)?;
+        let loaded_results = loaded.search_top_k(&query, 3, None)?;
+
+        let ids_orig: Vec<u64> = original_results.iter().map(|r| r.message_id).collect();
+        let ids_loaded: Vec<u64> = loaded_results.iter().map(|r| r.message_id).collect();
+        assert_eq!(
+            ids_loaded, ids_orig,
+            "Pre-converted index must return same message IDs"
+        );
+
+        // Verify scores are approximately equal (F16→F32 conversion may introduce tiny FP differences).
+        for (orig, loaded) in original_results.iter().zip(loaded_results.iter()) {
+            let rel_err = (orig.score - loaded.score).abs() / orig.score.abs().max(1e-10);
+            assert!(
+                rel_err < 1e-3,
+                "Score difference too large: orig={}, loaded={}, rel_err={}",
+                orig.score,
+                loaded.score,
+                rel_err
+            );
+        }
+
+        // Verify save roundtrip preserves the index (convert back to F16).
+        let path2 = dir.path().join("index2.cvvi");
+        loaded.save(&path2)?;
+        let reloaded = VectorIndex::load(&path2)?;
+        let reloaded_results = reloaded.search_top_k(&query, 3, None)?;
+        let ids_reloaded: Vec<u64> = reloaded_results.iter().map(|r| r.message_id).collect();
+        assert_eq!(
+            ids_reloaded, ids_orig,
+            "Re-saved index must return same message IDs"
+        );
 
         Ok(())
     }

@@ -540,7 +540,7 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].messages[0].created_at, Some(1733000000));
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000000000));
     }
 
     #[test]
@@ -556,7 +556,7 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].messages[0].created_at, Some(1733000001));
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000001000));
     }
 
     #[test]
@@ -572,7 +572,7 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].messages[0].created_at, Some(1733000002));
+        assert_eq!(convs[0].messages[0].created_at, Some(1733000002000));
     }
 
     #[test]
@@ -750,8 +750,8 @@ mod tests {
         let ctx = ScanContext::local_default(storage.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].started_at, Some(1733000000));
-        assert_eq!(convs[0].ended_at, Some(1733000100));
+        assert_eq!(convs[0].started_at, Some(1733000000000));
+        assert_eq!(convs[0].ended_at, Some(1733000100000));
     }
 
     // =====================================================

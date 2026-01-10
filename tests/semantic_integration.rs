@@ -953,7 +953,7 @@ fn test_search_mode_flag_consistency() {
             .env("HOME", home)
             .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
             .output()
-            .expect(&format!("search invocation {}", i));
+            .unwrap_or_else(|e| panic!("search invocation {i}: {e}"));
 
         assert!(
             output.status.success(),

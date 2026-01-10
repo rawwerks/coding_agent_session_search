@@ -337,6 +337,43 @@ fn build_query(dimension: usize) -> Vec<f32> {
     query
 }
 
+/// Benchmark vector search with 50k entries loaded from disk (F16 pre-conversion).
+/// This tests P0 Opt 1: Pre-Convert F16→F32 Slab at Load Time.
+/// Target: ~30ms (down from ~56ms without pre-conversion)
+fn bench_vector_index_search_50k_loaded(c: &mut Criterion) {
+    use tempfile::TempDir;
+
+    let dimension = 384;
+    let count = 50_000;
+    let entries = build_entries(count, dimension);
+
+    // Build and save the F16 index.
+    let index = VectorIndex::build(
+        "bench-embedder",
+        "rev",
+        dimension,
+        Quantization::F16,
+        entries,
+    )
+    .unwrap();
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("bench.cvvi");
+    index.save(&path).unwrap();
+
+    // Load the index (triggers F16 pre-conversion if CASS_F16_PRECONVERT != 0).
+    let loaded = VectorIndex::load(&path).unwrap();
+    let query = build_query(dimension);
+
+    c.bench_function("vector_index_search_50k_loaded", |b| {
+        b.iter(|| {
+            let results = loaded
+                .search_top_k(black_box(&query), 25, None)
+                .unwrap_or_default();
+            black_box(results);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     // Hash embedder benchmarks
@@ -353,6 +390,7 @@ criterion_group!(
     bench_vector_index_search_10k,
     bench_vector_index_search_50k,
     bench_vector_index_search_50k_filtered,
+    bench_vector_index_search_50k_loaded,
     bench_vector_search_scaling,
 );
 criterion_main!(benches);

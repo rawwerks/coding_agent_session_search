@@ -602,7 +602,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Test", "created_at": 1733000000}]
         });
         let msgs = extract_messages(&val, None).unwrap();
-        assert_eq!(msgs[0].created_at, Some(1733000000));
+        assert_eq!(msgs[0].created_at, Some(1733000000000));
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Test", "createdAt": 1733000001}]
         });
         let msgs = extract_messages(&val, None).unwrap();
-        assert_eq!(msgs[0].created_at, Some(1733000001));
+        assert_eq!(msgs[0].created_at, Some(1733000001000));
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Test", "timestamp": 1733000002}]
         });
         let msgs = extract_messages(&val, None).unwrap();
-        assert_eq!(msgs[0].created_at, Some(1733000002));
+        assert_eq!(msgs[0].created_at, Some(1733000002000));
     }
 
     #[test]
@@ -629,7 +629,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Test", "ts": 1733000003}]
         });
         let msgs = extract_messages(&val, None).unwrap();
-        assert_eq!(msgs[0].created_at, Some(1733000003));
+        assert_eq!(msgs[0].created_at, Some(1733000003000));
     }
 
     #[test]
@@ -726,7 +726,7 @@ mod tests {
             "messages": [{"role": "user", "content": "Test", "sentAt": 1733000005}]
         });
         let msgs = extract_messages(&val, None).unwrap();
-        assert_eq!(msgs[0].created_at, Some(1733000005));
+        assert_eq!(msgs[0].created_at, Some(1733000005000));
     }
 
     // =====================================================
@@ -885,8 +885,8 @@ mod tests {
         let ctx = ScanContext::local_default(amp_dir.clone(), None);
         let convs = connector.scan(&ctx).unwrap();
 
-        assert_eq!(convs[0].started_at, Some(1733000000));
-        assert_eq!(convs[0].ended_at, Some(1733000100));
+        assert_eq!(convs[0].started_at, Some(1733000000000));
+        assert_eq!(convs[0].ended_at, Some(1733000100000));
     }
 
     #[test]
