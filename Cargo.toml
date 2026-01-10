@@ -70,8 +70,8 @@ dialoguer = "*"
 
 # SFTP fallback for sync when rsync is unavailable
 ssh2 = "*"
-argon2 = "0.5.3"
-hkdf = "0.12.4"
+argon2 = "*"
+hkdf = "*"
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]

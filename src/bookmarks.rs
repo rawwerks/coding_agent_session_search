@@ -44,10 +44,7 @@ impl Bookmark {
         agent: impl Into<String>,
         workspace: impl Into<String>,
     ) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = current_timestamp();
 
         Self {
             id: 0, // Set by database on insert
@@ -162,10 +159,7 @@ impl BookmarkStore {
 
     /// Update an existing bookmark
     pub fn update(&self, bookmark: &Bookmark) -> Result<bool> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = current_timestamp();
 
         let rows = self.conn.execute(
             "UPDATE bookmarks SET title = ?1, note = ?2, tags = ?3, updated_at = ?4 WHERE id = ?5",
@@ -196,7 +190,7 @@ impl BookmarkStore {
                 "SELECT id, title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet
                  FROM bookmarks WHERE id = ?1",
                 [id],
-                |row| Ok(row_to_bookmark(row)),
+                row_to_bookmark,
             )
             .optional()
             .context("querying bookmark by id")
@@ -210,7 +204,7 @@ impl BookmarkStore {
                    FROM bookmarks ORDER BY created_at DESC";
 
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([], |row| Ok(row_to_bookmark(row)))?;
+        let rows = stmt.query_map([], row_to_bookmark)?;
 
         for bookmark in rows {
             let bookmark = bookmark?;
@@ -237,7 +231,7 @@ impl BookmarkStore {
              ORDER BY created_at DESC",
         )?;
 
-        let rows = stmt.query_map([&pattern], |row| Ok(row_to_bookmark(row)))?;
+        let rows = stmt.query_map([&pattern], row_to_bookmark)?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("searching bookmarks")
     }
@@ -286,38 +280,69 @@ impl BookmarkStore {
             serde_json::from_str(json).context("parsing bookmark JSON")?;
         let mut imported = 0;
 
+        let tx = self.conn.unchecked_transaction()?;
+
         for mut bookmark in bookmarks {
             // Check for duplicates
-            if !self.is_bookmarked(&bookmark.source_path, bookmark.line_number)? {
+            // We can't use self.is_bookmarked here easily because it borrows self.conn immutably,
+            // but we are inside a transaction.
+            // Actually, unchecked_transaction allows us to use the connection?
+            // No, Transaction borrows Connection mutably.
+            // We need to implement duplicate check manually or use INSERT OR IGNORE / INSERT ... ON CONFLICT
+            // But logic says "merges, doesn't overwrite".
+            
+            // Re-implement check using the transaction
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE source_path = ?1 AND line_number IS ?2)",
+                params![bookmark.source_path, bookmark.line_number.map(|n| n as i64)],
+                |row| row.get(0),
+            )?;
+
+            if !exists {
                 bookmark.id = 0; // Reset ID for new insert
-                self.add(&bookmark)?;
+                tx.execute(
+                    "INSERT INTO bookmarks (title, source_path, line_number, agent, workspace, note, tags, created_at, updated_at, snippet)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        bookmark.title,
+                        bookmark.source_path,
+                        bookmark.line_number.map(|n| n as i64),
+                        bookmark.agent,
+                        bookmark.workspace,
+                        bookmark.note,
+                        bookmark.tags,
+                        bookmark.created_at,
+                        bookmark.updated_at,
+                        bookmark.snippet,
+                    ],
+                )?;
                 imported += 1;
             }
         }
+
+        tx.commit()?;
 
         Ok(imported)
     }
 }
 
 /// Convert a database row to a Bookmark
-fn row_to_bookmark(row: &rusqlite::Row) -> Bookmark {
-    Bookmark {
-        id: row.get(0).unwrap_or(0),
-        title: row.get(1).unwrap_or_default(),
-        source_path: row.get(2).unwrap_or_default(),
+fn row_to_bookmark(row: &rusqlite::Row) -> rusqlite::Result<Bookmark> {
+    Ok(Bookmark {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        source_path: row.get(2)?,
         line_number: row
-            .get::<_, Option<i64>>(3)
-            .ok()
-            .flatten()
+            .get::<_, Option<i64>>(3)?
             .map(|n| n as usize),
-        agent: row.get(4).unwrap_or_default(),
-        workspace: row.get(5).unwrap_or_default(),
-        note: row.get(6).unwrap_or_default(),
-        tags: row.get(7).unwrap_or_default(),
-        created_at: row.get(8).unwrap_or(0),
-        updated_at: row.get(9).unwrap_or(0),
-        snippet: row.get(10).unwrap_or_default(),
-    }
+        agent: row.get(4)?,
+        workspace: row.get(5)?,
+        note: row.get(6)?,
+        tags: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        snippet: row.get(10)?,
+    })
 }
 
 /// Get the default bookmarks database path
@@ -348,6 +373,13 @@ CREATE INDEX IF NOT EXISTS idx_bookmarks_source ON bookmarks(source_path, line_n
 CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bookmarks_agent ON bookmarks(agent);
 ";
+
+fn current_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
 
 #[cfg(test)]
 mod tests {

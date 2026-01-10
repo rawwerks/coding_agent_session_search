@@ -1516,10 +1516,12 @@ fn is_tool_invocation_noise(content: &str) -> bool {
 
     // Direct tool invocations that are just "[Tool: X - description]"
     if trimmed.starts_with("[Tool:") {
-        // If it's short or ends with ']', it's pure noise
-        if trimmed.len() < 100 || trimmed.ends_with(']') {
+        // Only filter if it's very short (likely just the tool name without args)
+        // e.g. "[Tool: Bash]" (12 chars) vs "[Tool: Bash - ls]" (17 chars)
+        if trimmed.len() < 15 {
             return true;
         }
+        return false;
     }
 
     // Also filter very short content that's just tool names or markers
@@ -2415,13 +2417,21 @@ impl SearchClient {
         }
         // Compute match type once for all results
         let query_match_type = dominant_match_type(query);
+
+        // FTS5 requires balanced double quotes.
+        // If unbalanced, strip them to avoid syntax error.
+        let mut safe_query = query.to_string();
+        if safe_query.matches('"').count() % 2 != 0 {
+            safe_query = safe_query.replace('"', "");
+        }
+
         let mut sql = String::from(
             "SELECT f.title, f.content, f.agent, f.workspace, f.source_path, f.created_at, bm25(fts_messages) AS score, snippet(fts_messages, 0, '**', '**', '...', 64) AS snippet, m.idx
              FROM fts_messages f
              LEFT JOIN messages m ON f.message_id = m.id
              WHERE fts_messages MATCH ?",
         );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_string())];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(safe_query)];
 
         if !filters.agents.is_empty() {
             let placeholders = (0..filters.agents.len())
@@ -3994,9 +4004,12 @@ mod tests {
     #[test]
     fn is_tool_invocation_noise_detects_noise() {
         // Short tool invocations are noise
-        assert!(is_tool_invocation_noise("[Tool: Bash - Check status]"));
+        assert!(is_tool_invocation_noise("[Tool: Bash]"));
         assert!(is_tool_invocation_noise("[Tool: Read]"));
-        assert!(is_tool_invocation_noise("  [Tool: Grep - Search files]  "));
+        
+        // Useful content should NOT be filtered
+        assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
+        assert!(!is_tool_invocation_noise("  [Tool: Grep - Search files]  "));
 
         // Very short tool markers
         assert!(is_tool_invocation_noise("[tool]"));
@@ -4004,15 +4017,20 @@ mod tests {
     }
 
     #[test]
-    fn is_tool_invocation_noise_allows_content() {
-        // Real content should not be flagged
-        assert!(!is_tool_invocation_noise(
-            "This is a normal message about tools"
-        ));
-        assert!(!is_tool_invocation_noise("The tool worked correctly"));
-        assert!(!is_tool_invocation_noise(
-            "I'll use the Read tool to check the file contents and then analyze the code structure for potential improvements."
-        ));
+    fn is_tool_invocation_noise_allows_useful_content() {
+        // This should NOT be considered noise
+        assert!(!is_tool_invocation_noise("[Tool: Read - src/main.rs]"));
+        assert!(!is_tool_invocation_noise("[Tool: Bash - cargo test --lib]"));
+    }
+
+    #[test]
+    fn is_tool_invocation_noise_detects_tool_markers() {
+        assert!(is_tool_invocation_noise("[Tool: Bash]"));
+        assert!(is_tool_invocation_noise("[Tool: Read]"));
+        
+        // Useful content allowed
+        assert!(!is_tool_invocation_noise("[Tool: Bash - Check status]"));
+        assert!(!is_tool_invocation_noise("  [Tool: Write - description]  "));
     }
 
     #[test]
@@ -4148,7 +4166,7 @@ mod tests {
             SearchHit {
                 title: "title1".into(),
                 snippet: "snip1".into(),
-                content: "[Tool: Bash - Run tests]".into(), // noise
+                content: "[Tool: Bash]".into(), // noise (short)
                 score: 1.0,
                 source_path: "a.jsonl".into(),
                 agent: "agent".into(),

@@ -5827,8 +5827,8 @@ pub fn run_tui(
                                 }
                             }
                         }
-                        // Multi-select: Ctrl+M toggles selection on current item
-                        KeyCode::Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Multi-select: Ctrl+X toggles selection on current item
+                        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if let Some(pane) = panes.get(active_pane) {
                                 let key = (active_pane, pane.selected);
                                 if selected.contains(&key) {
@@ -5839,7 +5839,7 @@ pub fn run_tui(
                                     selected.insert(key);
                                     open_confirm_armed = false;
                                     status = format!(
-                                        "Selected ({} total) · Ctrl+M toggle · A bulk actions · Esc clear",
+                                        "Selected ({} total) · Ctrl+X toggle · A bulk actions · Esc clear",
                                         selected.len()
                                     );
                                 }
@@ -5947,7 +5947,7 @@ pub fn run_tui(
                         // Bulk action menu: A opens when items are selected
                         KeyCode::Char('A') => {
                             if selected.is_empty() {
-                                status = "No items selected. m to select, Ctrl+A to select all."
+                                status = "No items selected. Ctrl+X to select, Ctrl+A to select all."
                                     .to_string();
                             } else {
                                 show_bulk_modal = true;

@@ -1,5 +1,6 @@
 pub mod bookmarks;
 pub mod connectors;
+pub mod encryption;
 pub mod export;
 pub mod indexer;
 pub mod model;
@@ -9,7 +10,6 @@ pub mod sources;
 pub mod storage;
 pub mod ui;
 pub mod update_check;
-pub mod encryption;
 
 use anyhow::Result;
 use base64::{Engine, prelude::*};
@@ -433,6 +433,36 @@ pub enum Commands {
         /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
         #[arg(long)]
         source: Option<String>,
+    },
+    /// Export encrypted searchable archive for GitHub Pages (P4.1)
+    Pages {
+        /// Export only (skip wizard and encryption) to specified directory
+        #[arg(long)]
+        export_only: Option<PathBuf>,
+
+        /// Filter by agent (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        agents: Option<Vec<String>>,
+
+        /// Filter by workspace (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        workspaces: Option<Vec<String>>,
+
+        /// Filter entries since ISO date or relative time
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Filter entries until ISO date or relative time
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Path mode: relative (default), basename, full, hash
+        #[arg(long, value_enum, default_value_t = crate::pages::export::PathMode::Relative)]
+        path_mode: crate::pages::export::PathMode,
+
+        /// Dry run (don't write files)
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
@@ -992,6 +1022,14 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
         "force",
         "dry-run",
         "no-cache",
+        "source",
+        "sessions-from",
+        "mode",
+        "highlight",
+        "timeout",
+        "explain",
+        "aggregate",
+        "display",
     ];
 
     // Subcommand aliases for common mistakes
@@ -1988,6 +2026,45 @@ async fn execute_cli(
                 } => {
                     run_view(&path, line, context, json || robot_mode)?;
                 }
+                Commands::Pages {
+                    export_only,
+                    agents,
+                    workspaces,
+                    since,
+                    until,
+                    path_mode,
+                    dry_run,
+                } => {
+                    if let Some(output_path) = export_only {
+                        crate::pages::export::run_pages_export(
+                            cli.db.clone(),
+                            output_path.clone(),
+                            agents.clone(),
+                            workspaces.clone(),
+                            since.clone(),
+                            until.clone(),
+                            path_mode,
+                            dry_run,
+                        )
+                        .map_err(|e| CliError {
+                            code: 9,
+                            kind: "pages",
+                            message: format!("Export failed: {e}"),
+                            hint: None,
+                            retryable: false,
+                        })?;
+                    } else {
+                        crate::pages::wizard::PagesWizard::new()
+                            .run()
+                            .map_err(|e| CliError {
+                                code: 9,
+                                kind: "pages",
+                                message: format!("Wizard failed: {e}"),
+                                hint: None,
+                                retryable: false,
+                            })?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -2262,6 +2339,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
+        Some(Commands::Pages { .. }) => "pages".to_string(),
         None => "(default)".to_string(),
     }
 }

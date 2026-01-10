@@ -86,7 +86,10 @@ fn e2e_full_optimization_chain() {
     println!("=== E2E Optimization Chain Test ===");
 
     // Phase 1: Create test index
-    println!("Phase 1: Creating test index with {} vectors", TEST_CORPUS_SIZE);
+    println!(
+        "Phase 1: Creating test index with {} vectors",
+        TEST_CORPUS_SIZE
+    );
     let start = Instant::now();
     let index = create_test_index();
     println!("  Index created in {:?}", start.elapsed());
@@ -113,7 +116,10 @@ fn e2e_full_optimization_chain() {
         let result = run_search(&loaded_index, &query, k);
         durations.push(result.duration);
         if i == 0 {
-            println!("  First search returned {} results", result.message_ids.len());
+            println!(
+                "  First search returned {} results",
+                result.message_ids.len()
+            );
             assert_eq!(result.message_ids.len(), k);
         }
     }
@@ -152,7 +158,11 @@ fn e2e_rollback_env_vars() {
     println!("Getting baseline results with all optimizations enabled");
     let loaded_index = VectorIndex::load(&path).expect("Failed to load index");
     let baseline = run_search(&loaded_index, &query, k);
-    println!("  Baseline: {} results in {:?}", baseline.message_ids.len(), baseline.duration);
+    println!(
+        "  Baseline: {} results in {:?}",
+        baseline.message_ids.len(),
+        baseline.duration
+    );
 
     // Test Opt 1: F16 Pre-Convert rollback
     println!("\nTesting Opt 1 rollback (CASS_F16_PRECONVERT=0)");
@@ -166,7 +176,11 @@ fn e2e_rollback_env_vars() {
         baseline.message_ids, mmap_result.message_ids,
         "F16 pre-convert rollback changed results"
     );
-    println!("  Opt 1 rollback: {} results in {:?}", mmap_result.message_ids.len(), mmap_result.duration);
+    println!(
+        "  Opt 1 rollback: {} results in {:?}",
+        mmap_result.message_ids.len(),
+        mmap_result.duration
+    );
     println!("  Results match baseline");
 
     // Test Opt 2: SIMD Dot Product rollback
@@ -257,7 +271,10 @@ fn e2e_parallel_search_with_filters() {
             row.agent_id
         );
     }
-    println!("  All {} results have agent_id in [0, 1]", multi_filtered.len());
+    println!(
+        "  All {} results have agent_id in [0, 1]",
+        multi_filtered.len()
+    );
 
     println!("=== Parallel Filter Test PASSED ===");
 }
@@ -294,14 +311,8 @@ fn e2e_performance_scaling() {
             })
             .collect();
 
-        let index = VectorIndex::build(
-            "test",
-            "rev",
-            VECTOR_DIMENSION,
-            Quantization::F32,
-            entries,
-        )
-        .expect("Failed to build index");
+        let index = VectorIndex::build("test", "rev", VECTOR_DIMENSION, Quantization::F32, entries)
+            .expect("Failed to build index");
 
         // Warm up
         let _ = index.search_top_k(&query, k, None);

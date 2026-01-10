@@ -1,6 +1,4 @@
-use coding_agent_search::encryption::{
-    aes_gcm_encrypt, argon2id_hash, hkdf_expand, Argon2Params
-};
+use coding_agent_search::encryption::{Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_expand};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -15,6 +13,7 @@ struct AesGcmVector {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct Argon2Vector {
     name: String,
     password: String,
@@ -56,9 +55,17 @@ fn test_aes_gcm_vectors() {
         let expected_tag = hex::decode(&v.tag).unwrap();
 
         let (ciphertext, tag) = aes_gcm_encrypt(&key, &nonce, &plaintext, &aad);
-        
-        assert_eq!(ciphertext, expected_ciphertext, "Ciphertext mismatch for {}", v.name);
+
+        assert_eq!(
+            ciphertext, expected_ciphertext,
+            "Ciphertext mismatch for {}",
+            v.name
+        );
         assert_eq!(tag, expected_tag, "Tag mismatch for {}", v.name);
+
+        let decrypted = aes_gcm_decrypt(&key, &nonce, &ciphertext, &aad, &tag)
+            .expect("decryption failed");
+        assert_eq!(decrypted, plaintext, "Decryption mismatch for {}", v.name);
     }
 }
 
@@ -73,12 +80,13 @@ fn test_argon2_vectors() {
             v.iterations,
             v.parallelism,
             Some(v.output_len as usize),
-        ).unwrap();
+        )
+        .unwrap();
+
+        let expected = hex::decode(&v.expected_hash_hex).unwrap();
+        let result = argon2id_hash(password, salt, &params);
         
-        let _expected = hex::decode(&v.expected_hash_hex).unwrap();
-        let _result = argon2id_hash(password, salt, &params);
-        
-        // assert_eq!(_result, _expected, "Argon2 mismatch for {}", v.name);
+        assert_eq!(result, expected, "Argon2 mismatch for {}", v.name);
     }
 }
 
@@ -90,9 +98,9 @@ fn test_hkdf_vectors() {
         let salt = hex::decode(&v.salt).unwrap();
         let info = hex::decode(&v.info).unwrap();
         let expected = hex::decode(&v.expected_okm).unwrap();
-        
+
         let result = hkdf_expand(&ikm, &salt, &info, v.output_len);
-        
+
         assert_eq!(result, expected, "HKDF mismatch for {}", v.name);
     }
 }

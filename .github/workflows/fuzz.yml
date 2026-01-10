@@ -1,0 +1,36 @@
+# .github/workflows/fuzz.yml
+name: Fuzzing
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"  # Weekly Sunday 2am
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Define fuzz targets here as they are added
+        target: [] 
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      
+      - name: Run fuzzer
+        if: ${{ matrix.target != '' }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=3600
+        continue-on-error: true
+      
+      - name: Upload crashes
+        if: always() && matrix.target != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/

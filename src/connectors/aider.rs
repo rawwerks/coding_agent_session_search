@@ -105,7 +105,7 @@ impl AiderConnector {
 
         Ok(NormalizedConversation {
             agent_slug: "aider".to_string(),
-            external_id: path.file_name().map(|n| n.to_string_lossy().to_string()),
+            external_id: Some(path.to_string_lossy().to_string()),
             title: Some(format!("Aider Chat: {}", path.display())),
             workspace: path.parent().map(std::path::Path::to_path_buf),
             source_path: path.to_path_buf(),
@@ -438,7 +438,7 @@ Second assistant response"#;
         let connector = AiderConnector::new();
         let conv = connector.parse_chat_history(&history_file).unwrap();
 
-        assert_eq!(conv.external_id, Some(".aider.chat.history.md".to_string()));
+        assert_eq!(conv.external_id, Some(history_file.to_string_lossy().to_string()));
     }
 
     #[test]

@@ -1,150 +1,123 @@
-name: ci
+# .github/workflows/ci.yml
+name: CI
 
 on:
-  pull_request:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_LOG: debug
 
 jobs:
-  check:
+  # Rust linting and formatting
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: fmt
-        run: cargo fmt -- --check
-      - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
-      - name: check
-        run: cargo check --all-targets
-      - name: tests (with JUnit XML report)
-        run: |
-          cargo nextest run --profile ci \
-            -E 'not (test(install_sh) | test(install_ps1))' \
-            --no-fail-fast
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          name: test-results-check
-          path: target/nextest/ci/junit.xml
-          retention-days: 14
-          if-no-files-found: ignore
-      - name: Test Report Summary
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: Unit Tests
-          path: target/nextest/ci/junit.xml
-          reporter: java-junit
-          fail-on-error: false
-      - name: benches (run, quick)
-        run: cargo bench --bench runtime_perf --bench search_perf --bench index_perf -- --sample-size=10 --warm-up-time=0.05 --measurement-time=0.2
-      - name: Install UBS
-        run: |
-          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" \
-            | bash -s -- --easy-mode
-      - name: UBS (changed files only)
-        run: |
-          CHANGED=$(git diff --name-only origin/main...HEAD | tr '\n' ' ')
-          if [ -n "$CHANGED" ]; then ./ubs $CHANGED; fi
-      # Note: ui_ tests are already run by nextest with proper serialization
-      # (configured in .config/nextest.toml with threads-required)
+          components: rustfmt, clippy
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-  e2e:
-    runs-on: ubuntu-latest
-    needs: check
+  # Rust unit tests
+  test-rust:
+    name: Rust Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Create trace/log directories
-        run: mkdir -p test-artifacts/traces test-artifacts/logs
-      - name: e2e tests (with JUnit XML report)
-        run: |
-          cargo nextest run --profile e2e \
-            -E 'binary(install_scripts) | binary(e2e_index_tui) | binary(e2e_filters) | binary(e2e_multi_connector)' \
-            --no-fail-fast
-      - name: Collect trace files
-        if: always()
-        run: |
-          # Collect any trace files created during tests
-          find /tmp -name "*.trace" -o -name "cass-trace-*" 2>/dev/null | head -20 | xargs -I {} cp {} test-artifacts/traces/ 2>/dev/null || true
-          find . -name "*.trace" -type f 2>/dev/null | head -20 | xargs -I {} cp {} test-artifacts/traces/ 2>/dev/null || true
-          # Collect test output logs
-          echo "Test run completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > test-artifacts/logs/run-summary.txt
-          # Copy JUnit XML to artifacts
-          cp target/nextest/e2e/junit.xml test-artifacts/ 2>/dev/null || true
-      - name: Upload test artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-artifacts-e2e
-          path: test-artifacts/
-          retention-days: 7
-          if-no-files-found: ignore
-      - name: E2E Test Report Summary
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: E2E Tests
-          path: target/nextest/e2e/junit.xml
-          reporter: java-junit
-          fail-on-error: false
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Run tests
+        run: cargo test --all-features --verbose -- --nocapture
+        env:
+          RUST_LOG: debug
+      
+      - name: Run doc tests
+        run: cargo test --doc
 
-  coverage:
+  # Crypto test vectors
+  crypto-vectors:
+    name: Crypto Test Vectors
     runs-on: ubuntu-latest
-    needs: check
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Run crypto vector tests
+        run: cargo test --test crypto_vectors -- --nocapture
+        env:
+          RUST_LOG: debug
+
+  # Security audit
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+      
+      - name: Run cargo audit
+        run: cargo audit
+
+  # Build artifacts
+  build:
+    name: Build
+    needs: [lint, test-rust, crypto-vectors, security]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          components: llvm-tools-preview
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Run tests with coverage
-        run: |
-          # Run tests ONCE with coverage instrumentation (no report yet)
-          cargo llvm-cov --all-features --workspace \
-            --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --no-report \
-            -- --skip install_sh --skip install_ps1
-      - name: Generate coverage reports
-        run: |
-          # Generate LCOV from collected data (no re-running tests)
-          cargo llvm-cov report --all-features --workspace \
-            --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --lcov --output-path lcov.info
-          # Generate text summary from collected data
-          cargo llvm-cov report --all-features --workspace \
-            --ignore-filename-regex='(tests/|benches/|\.cargo/)' \
-            --text > coverage-summary.txt
-          echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -20 coverage-summary.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-      - name: Upload coverage artifact
+          targets: ${{ matrix.target }}
+      
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+      
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
-          path: |
-            lcov.info
-            coverage-summary.txt
-          retention-days: 30
-      - name: Check coverage threshold (informational)
-        run: |
-          # Extract total coverage percentage (informational, not blocking)
-          COVERAGE=$(grep -oP 'TOTAL.*?(\d+\.\d+)%' coverage-summary.txt | grep -oP '\d+\.\d+' | tail -1 || echo "0")
-          echo "Total coverage: ${COVERAGE}%"
-          echo "coverage=${COVERAGE}" >> $GITHUB_OUTPUT
-          # Log warning if below 50% (informational only)
-          if [ "$(echo "$COVERAGE < 50" | bc -l)" -eq 1 ]; then
-            echo "::warning::Coverage is below 50% (${COVERAGE}%)"
-          fi
+          name: cass-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cass*

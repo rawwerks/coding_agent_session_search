@@ -30,7 +30,7 @@ pub const CYCLE_TIME_PRESETS: &str = "Shift+F5";
 // Actions
 pub const COPY: &str = "y";
 pub const BULK_MENU: &str = "A";
-pub const TOGGLE_SELECT: &str = "Ctrl+M";
+pub const TOGGLE_SELECT: &str = "Ctrl+X";
 pub const PANE_FILTER: &str = "/";
 
 // Navigation

@@ -1027,6 +1027,74 @@
       "has_json_output": true
     },
     {
+      "name": "pages",
+      "description": "Export encrypted searchable archive for GitHub Pages (P4.1)",
+      "arguments": [
+        {
+          "name": "export-only",
+          "description": "Export only (skip wizard and encryption) to specified directory",
+          "arg_type": "option",
+          "value_type": "path",
+          "required": false
+        },
+        {
+          "name": "agents",
+          "description": "Filter by agent (comma-separated)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "workspaces",
+          "description": "Filter by workspace (comma-separated)",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "since",
+          "description": "Filter entries since ISO date or relative time",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "until",
+          "description": "Filter entries until ISO date or relative time",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "path-mode",
+          "description": "Path mode: relative (default), basename, full, hash",
+          "arg_type": "option",
+          "value_type": "enum",
+          "required": false,
+          "default": "relative",
+          "enum_values": [
+            "relative",
+            "basename",
+            "full",
+            "hash"
+          ]
+        },
+        {
+          "name": "dry-run",
+          "description": "Dry run (don't write files)",
+          "arg_type": "flag",
+          "required": false,
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "has_json_output": false
+    },
+    {
       "name": "sources",
       "description": "Manage remote sources (P5.x)",
       "arguments": [],

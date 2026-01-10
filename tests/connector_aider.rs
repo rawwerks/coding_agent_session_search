@@ -104,7 +104,7 @@ fn aider_sets_source_path() {
 #[test]
 fn aider_sets_external_id_from_filename() {
     let tmp = TempDir::new().unwrap();
-    create_aider_fixture(&tmp, ".aider.chat.history.md", "> Test\n\nResponse\n");
+    let path = create_aider_fixture(&tmp, ".aider.chat.history.md", "> Test\n\nResponse\n");
 
     let conn = AiderConnector::new();
     let ctx = ScanContext {
@@ -117,7 +117,7 @@ fn aider_sets_external_id_from_filename() {
     assert_eq!(convs.len(), 1);
     assert_eq!(
         convs[0].external_id,
-        Some(".aider.chat.history.md".to_string())
+        Some(path.to_string_lossy().to_string())
     );
 }
 

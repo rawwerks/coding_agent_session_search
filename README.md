@@ -1088,7 +1088,7 @@ When an exact query returns fewer than 3 results, `cass` automatically retries w
 
 | Key | Action |
 |-----|--------|
-| `m` | Toggle selection on current result |
+| `Ctrl+M` | Toggle selection on current result |
 | `Ctrl+A` | Select/deselect all visible results |
 | `A` | Open bulk actions menu (when items selected) |
 | `Ctrl+Enter` | Add to multi-open queue |
@@ -1147,8 +1147,8 @@ Control how much content shows in the detail preview. Cycle with `F7`:
 Efficiently work with multiple search results at once:
 
 **Multi-Select Mode**:
-1. Press `m` to toggle selection on current result (checkbox appears)
-2. Navigate to other results and press `m` again
+1. Press `Ctrl+M` to toggle selection on current result (checkbox appears)
+2. Navigate to other results and press `Ctrl+M` again
 3. Press `Ctrl+A` to select/deselect all visible results
 4. Selected count shown in footer: "3 selected"
 
@@ -1984,7 +1984,7 @@ cass
     - `Enter`: Open original log file in `$EDITOR`.
     - `Ctrl+Enter`: Add current result to queue (multi-open).
     - `Ctrl+O`: Open all queued results in editor.
-    - `m`: Toggle selection on current item.
+    - `Ctrl+M`: Toggle selection on current item.
     - `A`: Bulk actions menu (when items selected).
     - `y`: Copy file path or snippet to clipboard.
     - `/`: Find text within detail pane.

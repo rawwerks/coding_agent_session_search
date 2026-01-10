@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use rusqlite::Connection;
-    use tempfile::TempDir;
-    use std::path::Path;
     use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
+    use rusqlite::Connection;
+    use std::path::Path;
+    use tempfile::TempDir;
 
     fn setup_source_db(path: &Path) -> Result<()> {
         let conn = Connection::open(path)?;
-        
+
         conn.execute_batch(
             r#"
             CREATE TABLE conversations (
@@ -33,7 +33,7 @@ mod tests {
                 updated_at INTEGER,
                 model TEXT
             );
-            "#
+            "#,
         )?;
 
         // Insert test data
@@ -91,15 +91,20 @@ mod tests {
 
         // Verify output DB
         let conn = Connection::open(&output_path)?;
-        
+
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
         assert_eq!(count, 2);
 
-        let fts_count: i64 = conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))?;
+        let fts_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))?;
         assert_eq!(fts_count, 3);
 
         // Verify Path Transformation (Relative)
-        let path: String = conn.query_row("SELECT source_path FROM conversations WHERE id=1", [], |r| r.get(0))?;
+        let path: String = conn.query_row(
+            "SELECT source_path FROM conversations WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
         assert_eq!(path, ".claude/1.json"); // Stripped workspace prefix
 
         Ok(())
@@ -125,7 +130,7 @@ mod tests {
         let stats = engine.execute(|_, _| {}, None)?;
 
         assert_eq!(stats.conversations_processed, 1);
-        
+
         let conn = Connection::open(&output_path)?;
         let agent: String = conn.query_row("SELECT agent FROM conversations", [], |r| r.get(0))?;
         assert_eq!(agent, "claude");
@@ -153,8 +158,12 @@ mod tests {
         engine.execute(|_, _| {}, None)?;
 
         let conn = Connection::open(&output_path)?;
-        let path: String = conn.query_row("SELECT source_path FROM conversations WHERE id=1", [], |r| r.get(0))?;
-        
+        let path: String = conn.query_row(
+            "SELECT source_path FROM conversations WHERE id=1",
+            [],
+            |r| r.get(0),
+        )?;
+
         assert_eq!(path.len(), 16); // 16 chars hex
         assert_ne!(path, "/home/user/proj1/.claude/1.json");
 

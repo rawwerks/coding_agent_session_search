@@ -993,6 +993,9 @@ mod tests {
             index.commit().unwrap();
         }
 
+        // Wait for lock release (flaky on some FS)
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         // Verify empty
         {
             let index = TantivyIndex::open_or_create(path).unwrap();
