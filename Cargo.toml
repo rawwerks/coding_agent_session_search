@@ -72,6 +72,9 @@ dialoguer = "*"
 ssh2 = "*"
 argon2 = "*"
 hkdf = "*"
+zeroize = { version = "*", features = ["derive"] }
+flate2 = "*"
+rand = "*"
 
 # macOS keychain access (optional, for ChatGPT decryption)
 [target.'cfg(target_os = "macos")'.dependencies]
