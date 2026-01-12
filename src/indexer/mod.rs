@@ -171,93 +171,95 @@ pub fn run_index(
     let data_dir = opts.data_dir.clone();
 
     // Return type includes whether agent was discovered (for post-parallel name collection)
-    let pending_batches: Vec<(&'static str, Vec<NormalizedConversation>, bool)> = connector_factories
-        .into_par_iter()
-        .filter_map(|(name, factory)| {
-            let conn = factory();
-            let detect = conn.detect();
-            let was_detected = detect.detected;
-            let mut convs = Vec::new();
-            let mut is_discovered = false;
+    let pending_batches: Vec<(&'static str, Vec<NormalizedConversation>, bool)> =
+        connector_factories
+            .into_par_iter()
+            .filter_map(|(name, factory)| {
+                let conn = factory();
+                let detect = conn.detect();
+                let was_detected = detect.detected;
+                let mut convs = Vec::new();
+                let mut is_discovered = false;
 
-            if detect.detected {
-                // Update discovered agents count immediately when detected
-                // This gives fast UI feedback during the discovery phase
-                // Note: AtomicUsize has no contention, only the mutex was problematic
-                if let Some(p) = progress_ref {
-                    p.discovered_agents.fetch_add(1, Ordering::Relaxed);
-                }
-                is_discovered = true;
-
-                let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
-                match conn.scan(&ctx) {
-                    Ok(mut local_convs) => {
-                        let local_origin = Origin::local();
-                        for conv in &mut local_convs {
-                            inject_provenance(conv, &local_origin);
-                        }
-                        convs.extend(local_convs);
+                if detect.detected {
+                    // Update discovered agents count immediately when detected
+                    // This gives fast UI feedback during the discovery phase
+                    // Note: AtomicUsize has no contention, only the mutex was problematic
+                    if let Some(p) = progress_ref {
+                        p.discovered_agents.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(e) => {
-                        // Note: agent was counted as discovered but scan failed
-                        // This is acceptable as detection succeeded (agent exists)
-                        tracing::warn!("scan failed for {}: {}", name, e);
-                    }
-                }
-            }
+                    is_discovered = true;
 
-            if !remote_roots.is_empty() {
-                for root in &remote_roots {
-                    let ctx = crate::connectors::ScanContext::with_roots(
-                        root.path.clone(),
-                        vec![root.clone()],
-                        since_ts,
-                    );
+                    let ctx =
+                        crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
                     match conn.scan(&ctx) {
-                        Ok(mut remote_convs) => {
-                            for conv in &mut remote_convs {
-                                inject_provenance(conv, &root.origin);
-                                apply_workspace_rewrite(conv, &root.workspace_rewrites);
+                        Ok(mut local_convs) => {
+                            let local_origin = Origin::local();
+                            for conv in &mut local_convs {
+                                inject_provenance(conv, &local_origin);
                             }
-                            convs.extend(remote_convs);
+                            convs.extend(local_convs);
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                connector = name,
-                                root = %root.path.display(),
-                                "remote scan failed: {e}"
-                            );
+                            // Note: agent was counted as discovered but scan failed
+                            // This is acceptable as detection succeeded (agent exists)
+                            tracing::warn!("scan failed for {}: {}", name, e);
                         }
                     }
                 }
-            }
 
-            // Agent discovered via remote scan (wasn't detected locally but has conversations)
-            if !was_detected && !convs.is_empty() {
-                if let Some(p) = progress_ref {
-                    p.discovered_agents.fetch_add(1, Ordering::Relaxed);
+                if !remote_roots.is_empty() {
+                    for root in &remote_roots {
+                        let ctx = crate::connectors::ScanContext::with_roots(
+                            root.path.clone(),
+                            vec![root.clone()],
+                            since_ts,
+                        );
+                        match conn.scan(&ctx) {
+                            Ok(mut remote_convs) => {
+                                for conv in &mut remote_convs {
+                                    inject_provenance(conv, &root.origin);
+                                    apply_workspace_rewrite(conv, &root.workspace_rewrites);
+                                }
+                                convs.extend(remote_convs);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    connector = name,
+                                    root = %root.path.display(),
+                                    "remote scan failed: {e}"
+                                );
+                            }
+                        }
+                    }
                 }
-                is_discovered = true;
-            }
 
-            // Mark this connector as scanned for discovery progress.
-            if let Some(p) = progress_ref {
-                p.current.fetch_add(1, Ordering::Relaxed);
-            }
+                // Agent discovered via remote scan (wasn't detected locally but has conversations)
+                if !was_detected && !convs.is_empty() {
+                    if let Some(p) = progress_ref {
+                        p.discovered_agents.fetch_add(1, Ordering::Relaxed);
+                    }
+                    is_discovered = true;
+                }
 
-            if convs.is_empty() && !is_discovered {
-                return None;
-            }
+                // Mark this connector as scanned for discovery progress.
+                if let Some(p) = progress_ref {
+                    p.current.fetch_add(1, Ordering::Relaxed);
+                }
 
-            tracing::info!(
-                connector = name,
-                conversations = convs.len(),
-                discovered = is_discovered,
-                "parallel_scan_complete"
-            );
-            Some((name, convs, is_discovered))
-        })
-        .collect();
+                if convs.is_empty() && !is_discovered {
+                    return None;
+                }
+
+                tracing::info!(
+                    connector = name,
+                    conversations = convs.len(),
+                    discovered = is_discovered,
+                    "parallel_scan_complete"
+                );
+                Some((name, convs, is_discovered))
+            })
+            .collect();
 
     // Post-parallel phase: collect discovered agent names with single mutex lock
     // This eliminates O(connectors) mutex acquisitions during parallel execution
@@ -272,7 +274,10 @@ pub fn run_index(
             names.extend(discovered_names.into_iter().map(String::from));
         }
 
-        let total_conversations: usize = pending_batches.iter().map(|(_, convs, _)| convs.len()).sum();
+        let total_conversations: usize = pending_batches
+            .iter()
+            .map(|(_, convs, _)| convs.len())
+            .sum();
         p.phase.store(2, Ordering::Relaxed); // Indexing
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
@@ -1391,7 +1396,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(msg_count, 0);
-        assert_eq!(storage.schema_version().unwrap(), 6);
+        assert_eq!(storage.schema_version().unwrap(), crate::storage::sqlite::CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
