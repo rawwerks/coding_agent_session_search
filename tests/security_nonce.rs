@@ -18,7 +18,9 @@ mod tests {
 
     #[test]
     fn test_nonce_uniqueness_sequential_chunks() {
-        let base_nonce: [u8; 12] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x00];
+        let base_nonce: [u8; 12] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x00,
+        ];
         let mut seen_nonces = HashSet::new();
 
         // Test first 10000 chunks for uniqueness
@@ -101,7 +103,11 @@ mod tests {
             let nonce2 = derive_chunk_nonce(&base2, i);
 
             // Same chunk index but different bases should produce different nonces
-            assert_ne!(nonce1, nonce2, "Different bases should produce different nonces at chunk {}", i);
+            assert_ne!(
+                nonce1, nonce2,
+                "Different bases should produce different nonces at chunk {}",
+                i
+            );
         }
     }
 
@@ -123,8 +129,9 @@ mod tests {
         // With XOR, if base[8..12] had certain values, different counters could
         // produce the same nonce. With direct assignment, this is impossible.
 
-        let base_nonce: [u8; 12] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                    0x00, 0x00, 0x00, 0x05]; // Last byte is 5
+        let base_nonce: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+        ]; // Last byte is 5
 
         let nonce_0 = derive_chunk_nonce(&base_nonce, 0);
         let nonce_5 = derive_chunk_nonce(&base_nonce, 5);
@@ -132,7 +139,10 @@ mod tests {
         // With XOR, nonce_0 would have last bytes = 0x00000005 (base XOR 0)
         // and nonce_5 would have last bytes = 0x00000000 (base XOR 5)
         // But with direct assignment, they should be different
-        assert_ne!(nonce_0, nonce_5, "Nonces should differ even when base matches counter");
+        assert_ne!(
+            nonce_0, nonce_5,
+            "Nonces should differ even when base matches counter"
+        );
 
         // Verify the actual values
         assert_eq!(&nonce_0[8..12], &[0x00, 0x00, 0x00, 0x00]); // counter 0
