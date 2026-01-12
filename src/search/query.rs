@@ -40,8 +40,10 @@ use crate::sources::provenance::SourceFilter;
 // Uses LRU eviction to bound memory, Arc<str> for cheap cloning.
 
 /// Thread-safe string interner with bounded memory via LRU eviction.
+/// Uses LruCache<Arc<str>, Arc<str>> where key and value are the same Arc,
+/// enabling O(1) lookup via Borrow<str> trait while preserving LRU semantics.
 pub struct StringInterner {
-    cache: RwLock<LruCache<Arc<str>, ()>>,
+    cache: RwLock<LruCache<Arc<str>, Arc<str>>>,
 }
 
 impl StringInterner {
@@ -57,16 +59,16 @@ impl StringInterner {
     /// Intern a string, returning a shared Arc<str>.
     /// If the string is already interned, returns the existing Arc.
     /// Otherwise, creates a new Arc and caches it.
+    ///
+    /// Performance: O(1) lookup via LruCache's internal HashMap.
     pub fn intern(&self, s: &str) -> Arc<str> {
-        // Fast path: read-only check for existing entry
+        // Fast path: read-only check for existing entry (O(1) lookup)
         {
             let cache = self.cache.read();
-            // LruCache doesn't have a method to get the key itself, so we check if it exists
-            // and then look it up. We use peek to avoid updating LRU order on read path.
-            for (key, _) in cache.iter() {
-                if key.as_ref() == s {
-                    return Arc::clone(key);
-                }
+            // LruCache::peek allows O(1) lookup without updating LRU order
+            // Arc<str>: Borrow<str> enables lookup by &str
+            if let Some(arc) = cache.peek(s) {
+                return Arc::clone(arc);
             }
         }
 
@@ -74,15 +76,14 @@ impl StringInterner {
         let mut cache = self.cache.write();
 
         // Double-check after acquiring write lock (another thread may have inserted)
-        for (key, _) in cache.iter() {
-            if key.as_ref() == s {
-                return Arc::clone(key);
-            }
+        // Use get() here to update LRU order since we're about to use this entry
+        if let Some(arc) = cache.get(s) {
+            return Arc::clone(arc);
         }
 
-        // Create new Arc<str> and insert
+        // Create new Arc<str> and insert (same Arc as key and value)
         let arc: Arc<str> = Arc::from(s);
-        cache.put(Arc::clone(&arc), ());
+        cache.put(Arc::clone(&arc), Arc::clone(&arc));
         arc
     }
 
