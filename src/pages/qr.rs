@@ -36,12 +36,22 @@ const RECOVERY_SECRET_BYTES: usize = 32;
 ///
 /// Contains high-entropy random bytes that can be used to derive
 /// a key encryption key (KEK) via HKDF-SHA256.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RecoverySecret {
     /// Raw secret bytes (zeroized on drop)
     bytes: Vec<u8>,
     /// Base64url-encoded secret (for QR code and text file)
     encoded: String,
+}
+
+impl std::fmt::Debug for RecoverySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact sensitive data to prevent accidental logging
+        f.debug_struct("RecoverySecret")
+            .field("entropy_bits", &self.entropy_bits())
+            .field("encoded", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl RecoverySecret {
