@@ -5,6 +5,7 @@ pub mod deploy_github;
 pub mod encrypt;
 pub mod export;
 pub mod fts;
+pub mod key_management;
 pub mod qr;
 pub mod redact;
 pub mod secret_scan;

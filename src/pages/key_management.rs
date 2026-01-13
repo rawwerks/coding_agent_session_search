@@ -16,22 +16,21 @@
 //! - Rotate re-encrypts entire payload with new DEK
 
 use crate::pages::encrypt::{
-    Argon2Params, DecryptionEngine, EncryptionConfig, KeySlot, KdfAlgorithm, SecretKey,
-    SlotType, load_config,
+    Argon2Params, DecryptionEngine, EncryptionConfig, KeySlot, KdfAlgorithm, SlotType, load_config,
 };
 use crate::pages::qr::RecoverySecret;
 use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use hkdf::Hkdf;
 use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::Sha256;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -211,13 +210,8 @@ pub fn key_revoke(
         bail!("Slot {} not found", slot_id_to_revoke);
     }
 
-    // Remove the slot
+    // Remove the slot (keeping IDs stable - they're part of the AAD binding)
     config.key_slots.retain(|s| s.id != slot_id_to_revoke);
-
-    // Re-number remaining slots (IDs are positional)
-    for (i, slot) in config.key_slots.iter_mut().enumerate() {
-        slot.id = i as u8;
-    }
 
     // Write updated config
     let file = File::create(&config_path)?;

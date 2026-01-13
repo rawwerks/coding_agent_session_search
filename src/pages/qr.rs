@@ -36,7 +36,7 @@ const RECOVERY_SECRET_BYTES: usize = 32;
 ///
 /// Contains high-entropy random bytes that can be used to derive
 /// a key encryption key (KEK) via HKDF-SHA256.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RecoverySecret {
     /// Raw secret bytes (zeroized on drop)
     bytes: Vec<u8>,

@@ -51,6 +51,11 @@ impl MergeStatus {
 // Bump this when schema/tokenizer changes. Used to trigger rebuilds.
 pub const SCHEMA_HASH: &str = "tantivy-schema-v6-provenance-indexed";
 
+/// Returns true if the given stored hash matches the current schema hash.
+pub fn schema_hash_matches(stored: &str) -> bool {
+    stored == SCHEMA_HASH
+}
+
 #[derive(Clone, Copy)]
 pub struct Fields {
     pub agent: Field,

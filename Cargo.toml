@@ -45,7 +45,7 @@ dirs = "*"
 walkdir = "*"
 glob = "*"
 base64 = "0.22"
-chrono = "*"
+chrono = { version = "*", features = ["serde"] }
 semver = "*"
 tracing-appender = "*"
 strsim = "0.11.1"
