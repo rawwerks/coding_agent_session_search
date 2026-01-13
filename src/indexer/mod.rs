@@ -85,9 +85,7 @@ pub enum IndexMessage {
         error: String,
     },
     /// Producer has finished scanning
-    Done {
-        connector_name: &'static str,
-    },
+    Done { connector_name: &'static str },
 }
 
 /// Default channel buffer size for streaming indexing.
@@ -235,11 +233,7 @@ fn run_streaming_consumer(
     let mut active_producers = num_producers;
     let mut discovered_names: Vec<String> = Vec::new();
     let mut total_conversations = 0usize;
-
-    // Switch to indexing phase
-    if let Some(p) = progress {
-        p.phase.store(2, Ordering::Relaxed); // Indexing
-    }
+    let mut switched_to_indexing = false;
 
     loop {
         match rx.recv() {
@@ -250,6 +244,16 @@ fn run_streaming_consumer(
             }) => {
                 let batch_size = conversations.len();
                 total_conversations += batch_size;
+
+                // Switch to indexing phase on first batch (reset total/current for accurate progress)
+                if !switched_to_indexing {
+                    if let Some(p) = progress {
+                        p.phase.store(2, Ordering::Relaxed); // Indexing
+                        p.total.store(0, Ordering::Relaxed); // Reset - will accumulate as batches arrive
+                        p.current.store(0, Ordering::Relaxed);
+                    }
+                    switched_to_indexing = true;
+                }
 
                 // Update progress total (we learn about sizes as batches arrive)
                 if let Some(p) = progress {
@@ -359,8 +363,14 @@ fn run_streaming_index(
     drop(tx);
 
     // Run consumer on main thread
-    let discovered_names =
-        run_streaming_consumer(rx, num_connectors, storage, t_index, &opts.progress, needs_rebuild)?;
+    let discovered_names = run_streaming_consumer(
+        rx,
+        num_connectors,
+        storage,
+        t_index,
+        &opts.progress,
+        needs_rebuild,
+    )?;
 
     // Wait for all producer threads to complete
     for handle in handles {
@@ -368,10 +378,10 @@ fn run_streaming_index(
     }
 
     // Update discovered agent names in progress tracker
-    if let Some(p) = &opts.progress {
-        if let Ok(mut names) = p.discovered_agent_names.lock() {
-            names.extend(discovered_names);
-        }
+    if let Some(p) = &opts.progress
+        && let Ok(mut names) = p.discovered_agent_names.lock()
+    {
+        names.extend(discovered_names);
     }
 
     Ok(())
@@ -612,10 +622,10 @@ pub fn run_index(
     let scan_start_ts = SqliteStorage::now_millis();
 
     // Reset progress error state
-    if let Some(p) = &opts.progress {
-        if let Ok(mut last_error) = p.last_error.lock() {
-            *last_error = None;
-        }
+    if let Some(p) = &opts.progress
+        && let Ok(mut last_error) = p.last_error.lock()
+    {
+        *last_error = None;
     }
 
     // Keep sources table in sync with sources.toml for provenance integrity.
@@ -943,16 +953,13 @@ fn reindex_paths(
 
     let triggers = classify_paths(paths, roots);
     if triggers.is_empty() {
-        eprintln!("DEBUG: triggers empty");
         return Ok(());
     }
-    eprintln!("DEBUG: triggers found: {}", triggers.len());
 
     for (kind, root, ts) in triggers {
         let conn = kind.create_connector();
         let detect = conn.detect();
         if !detect.detected && root.origin.source_id == "local" {
-            eprintln!("DEBUG: {:?} not detected, skipping local root", kind);
             // For local roots, if detection fails (e.g. root deleted), skip.
             // For remote roots, detection might fail but we should still try scanning
             // if it's a brute-force attempt.
@@ -976,7 +983,7 @@ fn reindex_paths(
                 .or_else(|| ts.map(|v| v.saturating_sub(1)))
                 .map(|v| v.saturating_sub(1))
         };
-        
+
         // Use explicit root context
         let ctx = crate::connectors::ScanContext::with_roots(
             root.path.clone(),
@@ -984,21 +991,19 @@ fn reindex_paths(
             since_ts,
         );
 
-        eprintln!("DEBUG: scanning {:?} in {}", kind, root.path.display());
         // SCAN PHASE: IO-heavy, no locks held
         let mut convs = match conn.scan(&ctx) {
             Ok(c) => c,
             Err(e) => {
-                tracing::debug!("watch scan failed for {:?} at {}: {}", kind, root.path.display(), e);
-                eprintln!("DEBUG: scan failed: {}", e);
+                tracing::debug!(
+                    "watch scan failed for {:?} at {}: {}",
+                    kind,
+                    root.path.display(),
+                    e
+                );
                 Vec::new()
             }
         };
-
-        if convs.is_empty() {
-            eprintln!("DEBUG: scan empty for {:?}", kind);
-        }
-        eprintln!("DEBUG: scan found {} convs", convs.len());
 
         // Provenance injection and path rewriting
         for conv in &mut convs {
@@ -1036,7 +1041,6 @@ fn reindex_paths(
             let entry = guard.entry(kind).or_insert(ts_val);
             *entry = (*entry).max(ts_val);
             save_watch_state(&opts.data_dir, &guard)?;
-            eprintln!("DEBUG: saved watch state for {:?}", kind);
         }
     }
 
@@ -1093,9 +1097,7 @@ fn classify_paths(
 ) -> Vec<(ConnectorKind, ScanRoot, Option<i64>)> {
     let mut batch_map: HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>)> = HashMap::new();
 
-    eprintln!("DEBUG: classify_paths checking {} paths against {} roots", paths.len(), roots.len());
     for p in paths {
-        eprintln!("DEBUG: checking path {}", p.display());
         if let Ok(meta) = std::fs::metadata(&p)
             && let Ok(time) = meta.modified()
             && let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH)
@@ -1105,23 +1107,23 @@ fn classify_paths(
             // Find ALL matching roots
             for (kind, root) in roots {
                 if p.starts_with(&root.path) {
-                     eprintln!("DEBUG: matched root {:?} {}", kind, root.path.display());
-                     let key = (*kind, root.path.clone());
-                     let entry = batch_map.entry(key).or_insert((root.clone(), None));
-                     // Update TS
-                     entry.1 = match (entry.1, ts) {
+                    let key = (*kind, root.path.clone());
+                    let entry = batch_map.entry(key).or_insert((root.clone(), None));
+                    // Update TS
+                    entry.1 = match (entry.1, ts) {
                         (Some(prev), Some(cur)) => Some(prev.max(cur)),
                         (None, Some(cur)) => Some(cur),
                         _ => entry.1,
                     };
                 }
             }
-        } else {
-            eprintln!("DEBUG: metadata failed for {}", p.display());
         }
     }
-    
-    batch_map.into_iter().map(|((kind, _), (root, ts))| (kind, root, ts)).collect()
+
+    batch_map
+        .into_iter()
+        .map(|((kind, _), (root, ts))| (kind, root, ts))
+        .collect()
 }
 
 fn sync_sources_config_to_db(storage: &SqliteStorage) {
@@ -1851,14 +1853,28 @@ mod tests {
 
         // roots are needed for classify_paths now
         let roots = vec![
-            (ConnectorKind::Codex, ScanRoot::local(tmp.path().join(".codex"))),
-            (ConnectorKind::Claude, ScanRoot::local(tmp.path().join("project"))),
-            (ConnectorKind::Aider, ScanRoot::local(tmp.path().join("repo"))),
-            (ConnectorKind::Cursor, ScanRoot::local(tmp.path().join("Cursor/User"))),
+            (
+                ConnectorKind::Codex,
+                ScanRoot::local(tmp.path().join(".codex")),
+            ),
+            (
+                ConnectorKind::Claude,
+                ScanRoot::local(tmp.path().join("project")),
+            ),
+            (
+                ConnectorKind::Aider,
+                ScanRoot::local(tmp.path().join("repo")),
+            ),
+            (
+                ConnectorKind::Cursor,
+                ScanRoot::local(tmp.path().join("Cursor/User")),
+            ),
             (
                 ConnectorKind::ChatGpt,
-                ScanRoot::local(tmp.path()
-                    .join("Library/Application Support/com.openai.chat")),
+                ScanRoot::local(
+                    tmp.path()
+                        .join("Library/Application Support/com.openai.chat"),
+                ),
             ),
         ];
 

@@ -1376,64 +1376,24 @@ impl SqliteStorage {
     /// Update daily stats for a single conversation insert.
     /// Called after inserting a new conversation to maintain materialized aggregates.
     pub fn update_daily_stats_for_conversation(
-        &self,
+        &mut self,
         agent_slug: &str,
         source_id: &str,
         started_at_ms: Option<i64>,
         message_count: i64,
         total_chars: i64,
     ) -> Result<()> {
-        let day_id = started_at_ms.map(Self::day_id_from_millis).unwrap_or(0);
-        let now = Self::now_millis();
-
-        // Update agent-specific + source-specific stats
-        self.conn.execute(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES (?, ?, ?, 1, ?, ?, ?)
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + 1,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            params![day_id, agent_slug, source_id, message_count, total_chars, now],
+        let tx = self.conn.transaction()?;
+        update_daily_stats_in_tx(
+            &tx,
+            agent_slug,
+            source_id,
+            started_at_ms,
+            1, // Assuming new session for this legacy API
+            message_count,
+            total_chars,
         )?;
-
-        // Update 'all' agent stats for this source
-        self.conn.execute(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES (?, 'all', ?, 1, ?, ?, ?)
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + 1,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            params![day_id, source_id, message_count, total_chars, now],
-        )?;
-
-        // Update agent stats for 'all' sources
-        self.conn.execute(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES (?, ?, 'all', 1, ?, ?, ?)
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + 1,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            params![day_id, agent_slug, message_count, total_chars, now],
-        )?;
-
-        // Update global 'all'/'all' stats
-        self.conn.execute(
-            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES (?, 'all', 'all', 1, ?, ?, ?)
-             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
-                 session_count = session_count + 1,
-                 message_count = message_count + excluded.message_count,
-                 total_chars = total_chars + excluded.total_chars,
-                 last_updated = excluded.last_updated",
-            params![day_id, message_count, total_chars, now],
-        )?;
-
+        tx.commit()?;
         Ok(())
     }
 
@@ -1610,6 +1570,51 @@ pub struct DailyStatsHealth {
     pub conversation_count: i64,
     pub materialized_total: i64,
     pub drift: i64,
+}
+
+/// Update daily stats within a transaction.
+/// Handles incrementing session_count, message_count, and total_chars for:
+/// - Specific agent + source
+/// - All agents + specific source
+/// - Specific agent + all sources
+/// - All agents + all sources
+fn update_daily_stats_in_tx(
+    tx: &Transaction<'_>,
+    agent_slug: &str,
+    source_id: &str,
+    started_at_ms: Option<i64>,
+    session_count_delta: i64,
+    message_count: i64,
+    total_chars: i64,
+) -> Result<()> {
+    if session_count_delta == 0 && message_count == 0 && total_chars == 0 {
+        return Ok(());
+    }
+
+    let day_id = started_at_ms.map(SqliteStorage::day_id_from_millis).unwrap_or(0);
+    let now = SqliteStorage::now_millis();
+
+    let updates = [
+        (agent_slug, source_id),
+        ("all", source_id),
+        (agent_slug, "all"),
+        ("all", "all"),
+    ];
+
+    for (agent, source) in updates {
+        tx.execute(
+            "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
+                 session_count = session_count + excluded.session_count,
+                 message_count = message_count + excluded.message_count,
+                 total_chars = total_chars + excluded.total_chars,
+                 last_updated = excluded.last_updated",
+            params![day_id, agent, source, session_count_delta, message_count, total_chars, now],
+        )?;
+    }
+
+    Ok(())
 }
 
 fn apply_pragmas(conn: &mut Connection) -> Result<()> {
@@ -1972,6 +1977,7 @@ fn insert_conversation_in_tx_batched(
             let cutoff = max_idx.unwrap_or(-1);
 
             let mut inserted_indices = Vec::new();
+            let mut new_chars: i64 = 0;
             for msg in &conv.messages {
                 if msg.idx <= cutoff {
                     continue;
@@ -1981,12 +1987,50 @@ fn insert_conversation_in_tx_batched(
                 // Collect FTS entry instead of inserting immediately
                 fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
                 inserted_indices.push(msg.idx);
+                new_chars += msg.content.len() as i64;
             }
 
-            if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+            // Update metadata fields and ended_at
+            if !inserted_indices.is_empty() {
+                // Update ended_at
+                if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+                    tx.execute(
+                        "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
+                        params![last_ts, conversation_id],
+                    )?;
+                }
+
+                // Update metadata, approx_tokens, etc.
+                // We overwrite with new metadata assuming the scanner produces complete/updated metadata.
+                let metadata_bin = serialize_json_to_msgpack(&conv.metadata_json);
                 tx.execute(
-                    "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?) WHERE id = ?",
-                    params![last_ts, conversation_id],
+                    "UPDATE conversations SET 
+                        title = COALESCE(?, title),
+                        approx_tokens = COALESCE(?, approx_tokens),
+                        metadata_json = ?,
+                        metadata_bin = ?,
+                        origin_host = COALESCE(?, origin_host)
+                     WHERE id = ?",
+                    params![
+                        conv.title,
+                        conv.approx_tokens,
+                        serde_json::to_string(&conv.metadata_json)?,
+                        metadata_bin,
+                        conv.origin_host,
+                        conversation_id
+                    ],
+                )?;
+
+                // Update daily stats (+0 sessions, +N messages)
+                let message_count = inserted_indices.len() as i64;
+                update_daily_stats_in_tx(
+                    tx,
+                    &conv.agent_slug,
+                    &conv.source_id,
+                    conv.started_at,
+                    0, // Existing session
+                    message_count,
+                    new_chars
                 )?;
             }
 
@@ -1999,12 +2043,25 @@ fn insert_conversation_in_tx_batched(
 
     // Insert new conversation
     let conv_id = insert_conversation(tx, agent_id, workspace_id, conv)?;
+    let mut total_chars: i64 = 0;
     for msg in &conv.messages {
         let msg_id = insert_message(tx, conv_id, msg)?;
         insert_snippets(tx, msg_id, &msg.snippets)?;
         // Collect FTS entry instead of inserting immediately
         fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+        total_chars += msg.content.len() as i64;
     }
+
+    // Update daily stats (+1 session, +N messages)
+    update_daily_stats_in_tx(
+        tx,
+        &conv.agent_slug,
+        &conv.source_id,
+        conv.started_at,
+        1, // New session
+        conv.messages.len() as i64,
+        total_chars
+    )?;
 
     Ok(InsertOutcome {
         conversation_id: conv_id,
