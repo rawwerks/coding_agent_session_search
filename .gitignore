@@ -29,3 +29,12 @@ temp_*.rs
 
 # Local backup directories
 .local_backup_*/
+
+# Benchmark target directories
+target_bench_*/
+
+# Web test artifacts
+web/node_modules/
+web/playwright-report/
+web/test-results/
+web/test-fixtures/
