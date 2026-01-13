@@ -63,17 +63,18 @@ fn count_conversations(db_path: &Path) -> i64 {
 // =============================================================================
 
 #[test]
-fn test_streaming_enabled_by_default() {
-    // Without setting the env var, streaming should be enabled
+fn test_streaming_enabled_when_var_set_to_1() {
+    // Explicitly setting to "1" enables streaming
     let _guard = EnvGuard::set("CASS_STREAMING_INDEX", "1");
     assert!(
         streaming_index_enabled(),
-        "streaming should be enabled by default"
+        "streaming should be enabled when CASS_STREAMING_INDEX=1"
     );
 }
 
 #[test]
 fn test_streaming_disabled_via_env_var() {
+    // Setting to "0" disables streaming
     let _guard = EnvGuard::set("CASS_STREAMING_INDEX", "0");
     assert!(
         !streaming_index_enabled(),
@@ -82,11 +83,12 @@ fn test_streaming_disabled_via_env_var() {
 }
 
 #[test]
-fn test_streaming_enabled_with_explicit_1() {
-    let _guard = EnvGuard::set("CASS_STREAMING_INDEX", "1");
+fn test_streaming_enabled_with_non_zero_value() {
+    // Any value other than "0" enables streaming
+    let _guard = EnvGuard::set("CASS_STREAMING_INDEX", "yes");
     assert!(
         streaming_index_enabled(),
-        "streaming should be enabled when CASS_STREAMING_INDEX=1"
+        "streaming should be enabled when CASS_STREAMING_INDEX is not '0'"
     );
 }
 
