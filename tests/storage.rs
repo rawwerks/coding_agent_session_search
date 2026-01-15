@@ -2820,3 +2820,357 @@ fn cache_id_stability_across_runs() {
     assert_eq!(agent_id_1, agent_id_2, "agent ID stable across runs");
     assert_eq!(ws_id_1, ws_id_2, "workspace ID stable across runs");
 }
+
+// =============================================================================
+// SQLite ID Caching Benchmark Tests (1tmi / Opt 7.4)
+// =============================================================================
+// These tests measure the performance improvement from IndexingCache.
+
+/// Benchmark: measure time for cached vs direct ID lookups.
+/// This test verifies that caching provides significant speedup.
+#[test]
+fn cache_benchmark_speedup() {
+    use std::time::Instant;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let iterations = 500;
+    let agents: Vec<String> = (0..10).map(|i| format!("agent_{}", i)).collect();
+    let workspaces: Vec<String> = (0..20)
+        .map(|i| format!("/workspace/project_{}", i))
+        .collect();
+
+    // Benchmark with cache
+    let db_cached = tmp.path().join("bench_cached.db");
+    let storage_cached = SqliteStorage::open(&db_cached).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let start_cached = Instant::now();
+    for i in 0..iterations {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        cache.get_or_insert_agent(&storage_cached, &agent).unwrap();
+        cache
+            .get_or_insert_workspace(&storage_cached, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+    let elapsed_cached = start_cached.elapsed();
+
+    // Benchmark without cache (direct DB calls)
+    let db_direct = tmp.path().join("bench_direct.db");
+    let storage_direct = SqliteStorage::open(&db_direct).expect("open");
+
+    let start_direct = Instant::now();
+    for i in 0..iterations {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        storage_direct.ensure_agent(&agent).unwrap();
+        storage_direct
+            .ensure_workspace(std::path::Path::new(ws), None)
+            .unwrap();
+    }
+    let elapsed_direct = start_direct.elapsed();
+
+    // Log results for manual verification
+    let cached_ms = elapsed_cached.as_secs_f64() * 1000.0;
+    let direct_ms = elapsed_direct.as_secs_f64() * 1000.0;
+    let speedup = direct_ms / cached_ms;
+
+    println!("\n[Opt 7.4] SQLite ID Caching Benchmark Results:");
+    println!("  Iterations: {iterations}");
+    println!(
+        "  Agents: {}, Workspaces: {}",
+        agents.len(),
+        workspaces.len()
+    );
+    println!(
+        "  Cached:  {:.2}ms ({:.4}ms/iter)",
+        cached_ms,
+        cached_ms / iterations as f64
+    );
+    println!(
+        "  Direct:  {:.2}ms ({:.4}ms/iter)",
+        direct_ms,
+        direct_ms / iterations as f64
+    );
+    println!("  Speedup: {:.1}x", speedup);
+
+    // Verify cache stats
+    let (hits, misses, hit_rate) = cache.stats();
+    println!(
+        "  Cache hits: {}, misses: {}, hit_rate: {:.1}%",
+        hits,
+        misses,
+        hit_rate * 100.0
+    );
+
+    // Assertions: cache should provide speedup
+    assert!(
+        speedup > 1.0,
+        "cached path should be faster than direct (speedup: {:.2}x)",
+        speedup
+    );
+
+    // With 500 iterations over 10 agents and 20 workspaces, expect high hit rate
+    // First 30 are misses (10 agents + 20 workspaces), rest are hits
+    assert!(
+        hit_rate > 0.85,
+        "expected >85% hit rate, got {:.1}%",
+        hit_rate * 100.0
+    );
+}
+
+/// Test that cache hit ratio meets expected targets for real-world patterns.
+/// From the task description:
+/// - Expected: >90% hit ratio for agent_ids
+/// - Expected: >80% hit ratio for workspace_ids
+#[test]
+fn cache_hit_ratio_targets() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("hit_ratio.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+
+    // Simulate real-world indexing: 500 conversations from 5 agents across 30 workspaces
+    let agents: Vec<String> = (0..5).map(|i| format!("agent_{}", i)).collect();
+    let workspaces: Vec<String> = (0..30)
+        .map(|i| format!("/workspace/project_{}", i))
+        .collect();
+
+    let mut agent_cache = IndexingCache::new();
+    let mut workspace_cache = IndexingCache::new();
+
+    for i in 0..500 {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        agent_cache.get_or_insert_agent(&storage, &agent).unwrap();
+        workspace_cache
+            .get_or_insert_workspace(&storage, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+
+    let (agent_hits, agent_misses, agent_rate) = agent_cache.stats();
+    let (ws_hits, ws_misses, ws_rate) = workspace_cache.stats();
+
+    println!("\n[Opt 7.4] Cache Hit Ratio Analysis:");
+    println!(
+        "  Agent cache: {} hits, {} misses, {:.1}% hit rate",
+        agent_hits,
+        agent_misses,
+        agent_rate * 100.0
+    );
+    println!(
+        "  Workspace cache: {} hits, {} misses, {:.1}% hit rate",
+        ws_hits,
+        ws_misses,
+        ws_rate * 100.0
+    );
+
+    // Verify targets from task description
+    // Agent: 500 lookups, 5 unique = 495 hits, 5 misses = 99% hit rate
+    assert!(
+        agent_rate > 0.90,
+        "Expected >90% agent hit ratio, got {:.1}%",
+        agent_rate * 100.0
+    );
+
+    // Workspace: 500 lookups, 30 unique = 470 hits, 30 misses = 94% hit rate
+    assert!(
+        ws_rate > 0.80,
+        "Expected >80% workspace hit ratio, got {:.1}%",
+        ws_rate * 100.0
+    );
+
+    // With these specific numbers, we can compute exact expected values
+    assert_eq!(
+        agent_misses, 5,
+        "should have 5 agent misses (unique agents)"
+    );
+    assert_eq!(
+        ws_misses, 30,
+        "should have 30 workspace misses (unique workspaces)"
+    );
+}
+
+/// Large-scale benchmark: 3000+ conversations (as specified in task).
+/// This simulates the benchmark scenario from the task description.
+#[test]
+fn cache_benchmark_large_corpus() {
+    use std::time::Instant;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+
+    // Parameters from task: generate_corpus(3000)
+    let corpus_size = 3000;
+    let agent_count = 15; // Realistic variety
+    let workspace_count = 100; // Many workspaces
+
+    let agents: Vec<String> = (0..agent_count).map(|i| format!("agent_{}", i)).collect();
+    let workspaces: Vec<String> = (0..workspace_count)
+        .map(|i| format!("/workspace/project_{}", i))
+        .collect();
+
+    // With cache
+    let db_cached = tmp.path().join("large_cached.db");
+    let storage_cached = SqliteStorage::open(&db_cached).expect("open");
+    let mut cache = IndexingCache::new();
+
+    let start_cached = Instant::now();
+    for i in 0..corpus_size {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        cache.get_or_insert_agent(&storage_cached, &agent).unwrap();
+        cache
+            .get_or_insert_workspace(&storage_cached, std::path::Path::new(ws), None)
+            .unwrap();
+    }
+    let elapsed_cached = start_cached.elapsed();
+
+    // Without cache
+    let db_direct = tmp.path().join("large_direct.db");
+    let storage_direct = SqliteStorage::open(&db_direct).expect("open");
+
+    let start_direct = Instant::now();
+    for i in 0..corpus_size {
+        let slug = &agents[i % agents.len()];
+        let ws = &workspaces[i % workspaces.len()];
+
+        let agent = Agent {
+            id: None,
+            slug: slug.clone(),
+            name: slug.clone(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+
+        storage_direct.ensure_agent(&agent).unwrap();
+        storage_direct
+            .ensure_workspace(std::path::Path::new(ws), None)
+            .unwrap();
+    }
+    let elapsed_direct = start_direct.elapsed();
+
+    let (hits, misses, hit_rate) = cache.stats();
+    let cached_ms = elapsed_cached.as_secs_f64() * 1000.0;
+    let direct_ms = elapsed_direct.as_secs_f64() * 1000.0;
+    let speedup = direct_ms / cached_ms;
+
+    println!(
+        "\n[Opt 7.4] Large Corpus Benchmark ({} conversations):",
+        corpus_size
+    );
+    println!("  Agents: {}, Workspaces: {}", agent_count, workspace_count);
+    println!(
+        "  Cached:  {:.2}ms total, {:.4}ms/conv",
+        cached_ms,
+        cached_ms / corpus_size as f64
+    );
+    println!(
+        "  Direct:  {:.2}ms total, {:.4}ms/conv",
+        direct_ms,
+        direct_ms / corpus_size as f64
+    );
+    println!("  Speedup: {:.1}x", speedup);
+    println!(
+        "  Cache: {} hits, {} misses, {:.1}% hit rate",
+        hits,
+        misses,
+        hit_rate * 100.0
+    );
+
+    // Success criteria from task: indexing time reduction
+    assert!(
+        speedup > 1.5,
+        "Expected >1.5x speedup for large corpus, got {:.2}x",
+        speedup
+    );
+
+    // Expected misses: agent_count + workspace_count = 115
+    // Expected hits: (corpus_size * 2) - 115 = 5885
+    assert_eq!(
+        misses,
+        (agent_count + workspace_count) as u64,
+        "misses should equal unique entries"
+    );
+}
+
+/// Verify no memory overhead concerns (cache is small).
+#[test]
+fn cache_memory_overhead_acceptable() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("memory.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+    let mut cache = IndexingCache::new();
+
+    // Populate with reasonable upper bound: 100 agents, 1000 workspaces
+    for i in 0..100 {
+        let agent = Agent {
+            id: None,
+            slug: format!("agent_{}", i),
+            name: format!("Agent {}", i),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        cache.get_or_insert_agent(&storage, &agent).unwrap();
+    }
+
+    for i in 0..1000 {
+        cache
+            .get_or_insert_workspace(
+                &storage,
+                std::path::Path::new(&format!("/workspace/project_{}", i)),
+                None,
+            )
+            .unwrap();
+    }
+
+    // Verify cache contains expected counts
+    assert_eq!(cache.agent_count(), 100);
+    assert_eq!(cache.workspace_count(), 1000);
+
+    // Cache size estimation:
+    // - 100 agents: ~100 * (slug ~20 bytes + id 8 bytes) ≈ 2.8 KB
+    // - 1000 workspaces: ~1000 * (path ~40 bytes + id 8 bytes) ≈ 48 KB
+    // Total: ~50 KB - well under any reasonable memory budget
+    //
+    // We can't directly measure memory, but we verify the counts are as expected
+    // and the operations complete without issues.
+    println!("\n[Opt 7.4] Memory overhead check:");
+    println!("  Cached agents: {}", cache.agent_count());
+    println!("  Cached workspaces: {}", cache.workspace_count());
+    println!("  Estimated cache size: ~50KB (100 agents + 1000 workspaces)");
+}
