@@ -440,6 +440,10 @@ pub enum Commands {
         #[arg(long)]
         export_only: Option<PathBuf>,
 
+        /// Verify an existing export bundle (for CI/CD)
+        #[arg(long)]
+        verify: Option<PathBuf>,
+
         /// Filter by agent (comma-separated)
         #[arg(long, value_delimiter = ',')]
         agents: Option<Vec<String>>,
@@ -480,9 +484,13 @@ pub enum Commands {
         #[arg(long, value_delimiter = ',')]
         secrets_deny: Vec<String>,
 
-        /// Output secret scan results as JSON
+        /// Output results as JSON (for verify and secret scan)
         #[arg(long)]
         json: bool,
+
+        /// Verbose output (show detailed check results)
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
@@ -2048,6 +2056,7 @@ async fn execute_cli(
                 }
                 Commands::Pages {
                     export_only,
+                    verify,
                     agents,
                     workspaces,
                     since,
@@ -2059,8 +2068,40 @@ async fn execute_cli(
                     secrets_allow,
                     secrets_deny,
                     json,
+                    verbose,
                 } => {
-                    if scan_secrets {
+                    // Handle --verify first
+                    if let Some(verify_path) = verify {
+                        let result =
+                            crate::pages::verify::verify_bundle(&verify_path, verbose).map_err(
+                                |e| CliError {
+                                    code: 9,
+                                    kind: "pages",
+                                    message: format!("Verification failed: {e}"),
+                                    hint: None,
+                                    retryable: false,
+                                },
+                            )?;
+
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                        } else {
+                            crate::pages::verify::print_result(&result, verbose);
+                        }
+
+                        // Exit with non-zero if invalid
+                        if result.status != "valid" {
+                            return Err(CliError {
+                                code: 1,
+                                kind: "pages",
+                                message: "Bundle verification failed".to_string(),
+                                hint: Some(
+                                    "Run with --verbose for detailed error information".to_string(),
+                                ),
+                                retryable: false,
+                            });
+                        }
+                    } else if scan_secrets {
                         let db_path = cli.db.clone().unwrap_or_else(|| {
                             directories::ProjectDirs::from(
                                 "com",

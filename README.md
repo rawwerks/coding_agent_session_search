@@ -11,7 +11,7 @@ Aggregates sessions from Codex, Claude Code, Gemini CLI, Cline, OpenCode, Amp, C
 <div align="center">
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode --verify
 ```
 
@@ -1969,7 +1969,7 @@ cass completions powershell >> $PROFILE
 
 ### 1. Install
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/coding_agent_session_search/main/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode --verify
 ```
 

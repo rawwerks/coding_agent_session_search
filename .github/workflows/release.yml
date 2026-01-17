@@ -66,8 +66,64 @@ jobs:
         with:
           path: artifacts
 
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+  # ==========================================================================
+  # Notify Package Managers to Update
+  # ==========================================================================
+  notify-homebrew-tap:
+    name: Notify Homebrew Tap
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Trigger formula update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: Dicklesworthstone/homebrew-tap
+          event-type: formula-update
+          client-payload: |
+            {
+              "tool": "cass",
+              "version": "${{ needs.release.outputs.version }}"
+            }
+
+      - name: Log dispatch
+        run: |
+          echo "✅ Dispatched formula-update event to homebrew-tap"
+          echo "   Tool: cass"
+          echo "   Version: ${{ needs.release.outputs.version }}"
+
+  notify-scoop-bucket:
+    name: Notify Scoop Bucket
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Trigger manifest update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          repository: Dicklesworthstone/scoop-bucket
+          event-type: manifest-update
+          client-payload: |
+            {
+              "tool": "cass",
+              "version": "${{ needs.release.outputs.version }}"
+            }
+
+      - name: Log dispatch
+        run: |
+          echo "✅ Dispatched manifest-update event to scoop-bucket"
+          echo "   Tool: cass"
+          echo "   Version: ${{ needs.release.outputs.version }}"
