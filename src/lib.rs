@@ -2072,16 +2072,14 @@ async fn execute_cli(
                 } => {
                     // Handle --verify first
                     if let Some(verify_path) = verify {
-                        let result =
-                            crate::pages::verify::verify_bundle(&verify_path, verbose).map_err(
-                                |e| CliError {
-                                    code: 9,
-                                    kind: "pages",
-                                    message: format!("Verification failed: {e}"),
-                                    hint: None,
-                                    retryable: false,
-                                },
-                            )?;
+                        let result = crate::pages::verify::verify_bundle(&verify_path, verbose)
+                            .map_err(|e| CliError {
+                                code: 9,
+                                kind: "pages",
+                                message: format!("Verification failed: {e}"),
+                                hint: None,
+                                retryable: false,
+                            })?;
 
                         if json {
                             println!("{}", serde_json::to_string_pretty(&result).unwrap());

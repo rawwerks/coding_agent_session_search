@@ -137,8 +137,13 @@ impl ExportEngine {
 
         // 4. Query Source
         let mut query = String::from(
-            "SELECT id, agent, workspace, title, source_path, started_at, ended_at, message_count, metadata_json 
-             FROM conversations WHERE 1=1"
+            "SELECT c.id, a.slug as agent, w.path as workspace, c.title, c.source_path, c.started_at, c.ended_at, 
+             (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count, 
+             c.metadata_json 
+             FROM conversations c
+             JOIN agents a ON c.agent_id = a.id
+             LEFT JOIN workspaces w ON c.workspace_id = w.id
+             WHERE 1=1"
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -146,7 +151,7 @@ impl ExportEngine {
             if agents.is_empty() {
                 query.push_str(" AND 1=0");
             } else {
-                query.push_str(" AND agent IN (");
+                query.push_str(" AND a.slug IN (");
                 for (i, agent) in agents.iter().enumerate() {
                     if i > 0 {
                         query.push_str(", ");
@@ -164,7 +169,7 @@ impl ExportEngine {
             if workspaces.is_empty() {
                 query.push_str(" AND 1=0");
             } else {
-                query.push_str(" AND workspace IN (");
+                query.push_str(" AND w.path IN (");
                 for (i, ws) in workspaces.iter().enumerate() {
                     if i > 0 {
                         query.push_str(", ");
@@ -177,12 +182,12 @@ impl ExportEngine {
         }
 
         if let Some(since) = self.filter.since {
-            query.push_str(" AND started_at >= ?");
+            query.push_str(" AND c.started_at >= ?");
             params.push(Box::new(since.timestamp_millis()));
         }
 
         if let Some(until) = self.filter.until {
-            query.push_str(" AND started_at <= ?");
+            query.push_str(" AND c.started_at <= ?");
             params.push(Box::new(until.timestamp_millis()));
         }
 

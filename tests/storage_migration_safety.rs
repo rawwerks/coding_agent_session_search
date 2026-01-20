@@ -146,6 +146,44 @@ fn test_migration_v1_to_current_preserves_data() {
         })
         .unwrap();
     assert_eq!(source_count, 1, "Local source should be created");
+
+    // Verify V5 features (source_id)
+    let source_id: String = conn
+        .query_row(
+            "SELECT source_id FROM conversations WHERE source_path = '/logs/v1.jsonl'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        source_id, "local",
+        "Legacy conversations should be attributed to local source"
+    );
+
+    // Verify V7 features (binary columns) - should be NULL for legacy rows
+    let metadata_bin: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT metadata_bin FROM conversations WHERE source_path = '/logs/v1.jsonl'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        metadata_bin.is_none(),
+        "Legacy rows should have NULL binary metadata"
+    );
+
+    let extra_bin: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT extra_bin FROM messages WHERE content = 'Hello from V1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        extra_bin.is_none(),
+        "Legacy rows should have NULL binary extra"
+    );
 }
 
 #[test]

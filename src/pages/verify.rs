@@ -257,10 +257,7 @@ fn check_config_schema(site_dir: &Path) -> CheckResult {
     // Validate export_id (base64, 16 bytes)
     match BASE64_STANDARD.decode(&config.export_id) {
         Ok(bytes) if bytes.len() == 16 => {}
-        Ok(bytes) => errors.push(format!(
-            "export_id should be 16 bytes, got {}",
-            bytes.len()
-        )),
+        Ok(bytes) => errors.push(format!("export_id should be 16 bytes, got {}", bytes.len())),
         Err(e) => errors.push(format!("export_id is not valid base64: {}", e)),
     }
 
@@ -378,7 +375,10 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
             let name_str = name.to_string_lossy();
             if name_str.starts_with("chunk-") && name_str.ends_with(".bin") {
                 // Extract chunk number
-                if let Some(num_str) = name_str.strip_prefix("chunk-").and_then(|s| s.strip_suffix(".bin")) {
+                if let Some(num_str) = name_str
+                    .strip_prefix("chunk-")
+                    .and_then(|s| s.strip_suffix(".bin"))
+                {
                     if let Ok(num) = num_str.parse::<u32>() {
                         found_chunks.insert(num);
                     }
@@ -392,7 +392,10 @@ fn check_payload_manifest(site_dir: &Path) -> CheckResult {
         let max_chunk = *found_chunks.iter().max().unwrap_or(&0);
         for i in 0..=max_chunk {
             if !found_chunks.contains(&i) {
-                errors.push(format!("Gap in chunk sequence: chunk-{:05}.bin is missing", i));
+                errors.push(format!(
+                    "Gap in chunk sequence: chunk-{:05}.bin is missing",
+                    i
+                ));
             }
         }
     }
@@ -525,11 +528,11 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
             // Check for patterns that indicate actual secrets being stored
             // These patterns look for JSON keys that shouldn't exist in public config
             let forbidden_patterns = [
-                ("\"password\":", "password field"),           // Password stored in config
-                ("\"secret\":", "secret field"),               // Secret stored directly
-                ("\"private_key\":", "private_key field"),     // Private key in config
-                ("\"master_key\":", "master_key field"),       // Master key exposed
-                ("\"recovery_secret\":", "recovery_secret"),   // Recovery secret in config
+                ("\"password\":", "password field"), // Password stored in config
+                ("\"secret\":", "secret field"),     // Secret stored directly
+                ("\"private_key\":", "private_key field"), // Private key in config
+                ("\"master_key\":", "master_key field"), // Master key exposed
+                ("\"recovery_secret\":", "recovery_secret"), // Recovery secret in config
             ];
             for (pattern, description) in forbidden_patterns {
                 if content_lower.contains(pattern) {
@@ -608,13 +611,25 @@ fn calculate_dir_size(dir: &Path) -> Result<u64> {
 
 /// Print verification result in human-readable format
 pub fn print_result(result: &VerifyResult, verbose: bool) {
-    let status_icon = if result.status == "valid" { "✓" } else { "✗" };
-    println!("\n{} Bundle status: {}", status_icon, result.status.to_uppercase());
+    let status_icon = if result.status == "valid" {
+        "✓"
+    } else {
+        "✗"
+    };
+    println!(
+        "\n{} Bundle status: {}",
+        status_icon,
+        result.status.to_uppercase()
+    );
 
     println!("\nChecks:");
     print_check("  Required files", &result.checks.required_files, verbose);
     print_check("  Config schema", &result.checks.config_schema, verbose);
-    print_check("  Payload manifest", &result.checks.payload_manifest, verbose);
+    print_check(
+        "  Payload manifest",
+        &result.checks.payload_manifest,
+        verbose,
+    );
     print_check("  Size limits", &result.checks.size_limits, verbose);
     print_check("  Integrity", &result.checks.integrity, verbose);
     print_check("  No secrets", &result.checks.no_secrets_in_site, verbose);
@@ -626,7 +641,8 @@ pub fn print_result(result: &VerifyResult, verbose: bool) {
         }
     }
 
-    println!("\nTotal site size: {} bytes ({:.2} MB)",
+    println!(
+        "\nTotal site size: {} bytes ({:.2} MB)",
         result.site_size_bytes,
         result.site_size_bytes as f64 / (1024.0 * 1024.0)
     );
@@ -706,7 +722,10 @@ mod tests {
                 }
             }]
         });
-        fs::write(dir.join("config.json"), serde_json::to_string_pretty(&config)?)?;
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_string_pretty(&config)?,
+        )?;
 
         Ok(())
     }
@@ -723,22 +742,37 @@ mod tests {
 
         // Debug: print which checks failed
         if !result.checks.required_files.passed {
-            eprintln!("FAILED: required_files - {:?}", result.checks.required_files.details);
+            eprintln!(
+                "FAILED: required_files - {:?}",
+                result.checks.required_files.details
+            );
         }
         if !result.checks.config_schema.passed {
-            eprintln!("FAILED: config_schema - {:?}", result.checks.config_schema.details);
+            eprintln!(
+                "FAILED: config_schema - {:?}",
+                result.checks.config_schema.details
+            );
         }
         if !result.checks.payload_manifest.passed {
-            eprintln!("FAILED: payload_manifest - {:?}", result.checks.payload_manifest.details);
+            eprintln!(
+                "FAILED: payload_manifest - {:?}",
+                result.checks.payload_manifest.details
+            );
         }
         if !result.checks.size_limits.passed {
-            eprintln!("FAILED: size_limits - {:?}", result.checks.size_limits.details);
+            eprintln!(
+                "FAILED: size_limits - {:?}",
+                result.checks.size_limits.details
+            );
         }
         if !result.checks.integrity.passed {
             eprintln!("FAILED: integrity - {:?}", result.checks.integrity.details);
         }
         if !result.checks.no_secrets_in_site.passed {
-            eprintln!("FAILED: no_secrets_in_site - {:?}", result.checks.no_secrets_in_site.details);
+            eprintln!(
+                "FAILED: no_secrets_in_site - {:?}",
+                result.checks.no_secrets_in_site.details
+            );
         }
 
         assert_eq!(result.status, "valid");
@@ -771,7 +805,8 @@ mod tests {
         fs::write(
             site_dir.join("config.json"),
             r#"{"version": 2, "export_id": "invalid"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = verify_bundle(site_dir, false).unwrap();
         assert!(!result.checks.config_schema.passed);
@@ -807,10 +842,15 @@ mod tests {
         }
         // Add payload chunk
         let chunk_hash = compute_file_hash(&site_dir.join("payload/chunk-00000.bin")).unwrap();
-        let chunk_size = fs::metadata(site_dir.join("payload/chunk-00000.bin")).unwrap().len();
+        let chunk_size = fs::metadata(site_dir.join("payload/chunk-00000.bin"))
+            .unwrap()
+            .len();
         files.insert(
             "payload/chunk-00000.bin".to_string(),
-            IntegrityEntry { sha256: chunk_hash, size: chunk_size },
+            IntegrityEntry {
+                sha256: chunk_hash,
+                size: chunk_size,
+            },
         );
 
         let manifest = IntegrityManifest {
@@ -821,7 +861,8 @@ mod tests {
         fs::write(
             site_dir.join("integrity.json"),
             serde_json::to_string_pretty(&manifest).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = verify_bundle(site_dir, false).unwrap();
         assert!(result.checks.integrity.passed);
@@ -839,7 +880,8 @@ mod tests {
         files.insert(
             "index.html".to_string(),
             IntegrityEntry {
-                sha256: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
                 size: 10,
             },
         );
@@ -852,11 +894,20 @@ mod tests {
         fs::write(
             site_dir.join("integrity.json"),
             serde_json::to_string_pretty(&manifest).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = verify_bundle(site_dir, false).unwrap();
         assert!(!result.checks.integrity.passed);
-        assert!(result.checks.integrity.details.as_ref().unwrap().contains("Hash mismatch"));
+        assert!(
+            result
+                .checks
+                .integrity
+                .details
+                .as_ref()
+                .unwrap()
+                .contains("Hash mismatch")
+        );
     }
 
     #[test]
