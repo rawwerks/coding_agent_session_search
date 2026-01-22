@@ -12,6 +12,7 @@ pub mod fts;
 pub mod key_management;
 pub mod password;
 pub mod patterns;
+pub mod preview;
 pub mod profiles;
 pub mod qr;
 pub mod redact;

@@ -503,6 +503,18 @@ pub enum Commands {
         /// Include message attachments (images, PDFs, code snapshots)
         #[arg(long)]
         include_attachments: bool,
+
+        /// Preview an existing export locally (starts HTTP server)
+        #[arg(long)]
+        preview: Option<PathBuf>,
+
+        /// Port for preview server (default: 8080)
+        #[arg(long, default_value = "8080")]
+        port: u16,
+
+        /// Don't auto-open browser when starting preview server
+        #[arg(long)]
+        no_open: bool,
     },
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
@@ -2084,7 +2096,29 @@ async fn execute_cli(
                     no_encryption,
                     i_understand_unencrypted_risks,
                     include_attachments,
+                    preview,
+                    port,
+                    no_open,
                 } => {
+                    // Handle --preview first (starts local preview server)
+                    if let Some(preview_dir) = preview {
+                        let config = crate::pages::preview::PreviewConfig {
+                            site_dir: preview_dir,
+                            port,
+                            open_browser: !no_open,
+                        };
+                        crate::pages::preview::start_preview_server(config)
+                            .await
+                            .map_err(|e| CliError {
+                                code: 9,
+                                kind: "pages",
+                                message: format!("Preview server failed: {e}"),
+                                hint: Some("Check that the directory exists and port is available".to_string()),
+                                retryable: false,
+                            })?;
+                        return Ok(());
+                    }
+
                     // Check for unencrypted export in robot mode
                     if no_encryption && (json || robot_mode) && !i_understand_unencrypted_risks {
                         let error = crate::pages::confirmation::robot_mode_blocked_error();
