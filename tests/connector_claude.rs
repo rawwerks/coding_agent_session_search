@@ -91,7 +91,7 @@ fn claude_connector_parses_message_type_entries() {
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
-    let sample = r#"{"type":"message","message":{"role":"user","content":"Hello from message type"},"timestamp":"2025-11-12T18:31:18.000Z"}
+    let sample = r#"{"type":"message","role":"user","content":"Hello from message type","timestamp":"2025-11-12T18:31:18.000Z"}
 {"type":"message","message":{"role":"assistant","content":"Reply from message type"},"timestamp":"2025-11-12T18:31:20.000Z"}
 "#;
     fs::write(&file, sample).unwrap();

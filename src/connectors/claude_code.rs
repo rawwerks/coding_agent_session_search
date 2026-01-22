@@ -163,8 +163,11 @@ impl Connector for ClaudeCodeConnector {
                     // Role from message.role, top-level role, or entry type
                     let role = role_hint.or(entry_type).unwrap_or("agent");
 
-                    // Content from message.content (may be string or array)
-                    let content_val = val.get("message").and_then(|m| m.get("content"));
+                    // Content from message.content or top-level content (may be string or array)
+                    let content_val = val
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .or_else(|| val.get("content"));
                     let content_str = content_val
                         .map(crate::connectors::flatten_content)
                         .unwrap_or_default();
