@@ -7,8 +7,13 @@
 //! SSH operations without requiring external infrastructure.
 
 mod ssh_test_helper;
+mod util;
 
+use assert_cmd::cargo::cargo_bin_cmd;
+use coding_agent_search::sources::provenance::SourceKind;
+use coding_agent_search::storage::sqlite::SqliteStorage;
 use ssh_test_helper::{SshTestServer, docker_available};
+use util::EnvGuard;
 
 /// Skip tests if Docker is not available.
 fn require_docker() {
@@ -138,6 +143,186 @@ fn test_sync_multiple_paths() {
     assert!(
         codex_dest.join("sessions/session1.json").exists(),
         "Codex session should exist"
+    );
+}
+
+/// Integration test: End-to-end sources sync via cass CLI with real SSH.
+///
+/// Validates:
+/// - `cass sources sync` reports no sources when config is empty
+/// - `cass sources add` works against real SSH (via ssh config)
+/// - `cass sources sync --json` reports transfer stats
+/// - SQLite provenance + workspace path mappings are applied
+#[test]
+#[ignore = "requires Docker"]
+fn test_sources_sync_e2e_real_ssh() {
+    require_docker();
+
+    let server = SshTestServer::start().expect("SSH server should start");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home_dir = tmp.path().join("home");
+    let config_dir = tmp.path().join("config");
+    let data_dir = tmp.path().join("data");
+
+    std::fs::create_dir_all(home_dir.join(".ssh")).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::create_dir_all(&data_dir).unwrap();
+
+    // Write SSH config so `cass sources add` can connect via alias with port/key.
+    let ssh_config = format!(
+        "Host cass-test\n  HostName 127.0.0.1\n  User root\n  Port {}\n  IdentityFile {}\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n",
+        server.port(),
+        server.private_key_path().display()
+    );
+    let ssh_config_path = home_dir.join(".ssh/config");
+    std::fs::write(&ssh_config_path, ssh_config).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home_dir.join(".ssh"), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&ssh_config_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+    }
+
+    // Seed a session with workspace metadata for path mapping verification.
+    let seed_script = r#"mkdir -p /root/.claude/projects/workspace-a
+cat > /root/.claude/projects/workspace-a/session.jsonl <<'EOF'
+{"type":"user","cwd":"/root/projects/workspace-a","message":{"content":"Workspace mapping test"}}
+{"type":"assistant","message":{"content":"ok"}}
+EOF
+"#;
+    server
+        .ssh_exec_with_stdin(seed_script)
+        .expect("seed remote session");
+
+    let _guard_home = EnvGuard::set("HOME", home_dir.to_string_lossy());
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    let _guard_data = EnvGuard::set("CASS_DATA_DIR", data_dir.to_string_lossy());
+
+    // 1) Sync with no sources configured should return a friendly JSON status.
+    let no_sources = cargo_bin_cmd!("cass")
+        .args(["sources", "sync", "--json"])
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("sources sync (no sources)");
+    assert!(no_sources.status.success());
+    let no_sources_json: serde_json::Value =
+        serde_json::from_slice(&no_sources.stdout).expect("valid JSON");
+    assert_eq!(no_sources_json["status"], "no_sources");
+
+    // 2) Add a real SSH source (uses ssh config alias).
+    let add_output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "root@cass-test",
+            "--name",
+            "cass-test",
+            "--path",
+            "~/.claude/projects",
+        ])
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("sources add");
+    assert!(
+        add_output.status.success(),
+        "sources add should succeed: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+
+    // 3) Add a path mapping for workspace rewrite.
+    let map_output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "mappings",
+            "add",
+            "cass-test",
+            "--from",
+            "/root/projects",
+            "--to",
+            "/local/projects",
+        ])
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("sources mappings add");
+    assert!(
+        map_output.status.success(),
+        "sources mappings add should succeed: {}",
+        String::from_utf8_lossy(&map_output.stderr)
+    );
+
+    // 4) Sync via CLI (no-index for clean JSON output) and assert transfer metrics.
+    let sync_output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "sync",
+            "--source",
+            "cass-test",
+            "--json",
+            "--no-index",
+        ])
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("sources sync");
+    assert!(
+        sync_output.status.success(),
+        "sources sync should succeed: {}",
+        String::from_utf8_lossy(&sync_output.stderr)
+    );
+    let sync_json: serde_json::Value =
+        serde_json::from_slice(&sync_output.stdout).expect("valid JSON");
+    assert_eq!(sync_json["status"], "complete");
+    assert!(
+        sync_json["total_files"].as_u64().unwrap_or(0) > 0,
+        "expected transferred files in sync report"
+    );
+
+    // 5) Build index after sync, then validate provenance + path mappings in SQLite.
+    let index_output = cargo_bin_cmd!("cass")
+        .args(["index", "--full", "--data-dir", data_dir.to_str().unwrap()])
+        .env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .output()
+        .expect("cass index --full");
+    assert!(
+        index_output.status.success(),
+        "index should succeed: {}",
+        String::from_utf8_lossy(&index_output.stderr)
+    );
+
+    let db_path = data_dir.join("agent_search.db");
+    let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+    let sources = storage.list_sources().expect("list sources");
+    let remote_source = sources
+        .iter()
+        .find(|s| s.id == "cass-test")
+        .expect("remote source should exist");
+    assert_eq!(remote_source.kind, SourceKind::Ssh);
+
+    let conversations = storage.list_conversations(200, 0).expect("list conversations");
+    let remote_conv = conversations
+        .into_iter()
+        .find(|c| c.source_id == "cass-test")
+        .expect("remote conversation should exist");
+    assert_eq!(
+        remote_conv.workspace,
+        Some(std::path::PathBuf::from("/local/projects/workspace-a"))
+    );
+    assert_eq!(
+        remote_conv.metadata_json["cass"]["workspace_original"],
+        "/root/projects/workspace-a"
     );
 }
 

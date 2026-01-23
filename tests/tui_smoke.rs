@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 
 mod util;
-use util::{ConversationFixtureBuilder, EnvGuard, TestTracing};
+use util::EnvGuard;
 
 // =============================================================================
 // Fixture Helpers
@@ -35,18 +35,17 @@ fn make_claude_fixture(root: &Path, workspace_name: &str) {
     let session_dir = root.join(format!("projects/{workspace_name}"));
     fs::create_dir_all(&session_dir).unwrap();
     let file = session_dir.join("session.jsonl");
-    let sample = format!(
-        r#"{{"type":"user","timestamp":"2025-01-15T10:00:00Z","message":{{"content":"fix authentication bug"}}}}
-{{"type":"assistant","timestamp":"2025-01-15T10:00:05Z","message":{{"content":"I'll investigate the authentication module."}}}}
-{{"type":"user","timestamp":"2025-01-15T10:00:10Z","message":{{"content":"check the session timeout"}}}}
-{{"type":"assistant","timestamp":"2025-01-15T10:00:15Z","message":{{"content":"The session timeout is configured correctly."}}}}
+    let sample = r#"{"type":"user","timestamp":"2025-01-15T10:00:00Z","message":{"content":"fix authentication bug"}}
+{"type":"assistant","timestamp":"2025-01-15T10:00:05Z","message":{"content":"I'll investigate the authentication module."}}
+{"type":"user","timestamp":"2025-01-15T10:00:10Z","message":{"content":"check the session timeout"}}
+{"type":"assistant","timestamp":"2025-01-15T10:00:15Z","message":{"content":"The session timeout is configured correctly."}}
 "#
-    );
+        .to_string();
     fs::write(file, sample).unwrap();
 }
 
 /// Create multiple agent fixtures for multi-agent TUI testing.
-fn make_multi_agent_fixtures(data_dir: &Path, codex_home: &Path, claude_home: &Path) {
+fn make_multi_agent_fixtures(_data_dir: &Path, codex_home: &Path, claude_home: &Path) {
     // Codex fixture
     make_codex_fixture(codex_home);
 
@@ -82,7 +81,7 @@ fn tui_headless_launches_with_valid_index() {
         .success();
 
     // Run TUI in headless mode
-    let output = cargo_bin_cmd!("cass")
+    cargo_bin_cmd!("cass")
         .arg("tui")
         .arg("--data-dir")
         .arg(&data_dir)
@@ -266,7 +265,7 @@ fn tui_headless_multi_agent_index_and_search() {
         .assert()
         .success();
 
-    let codex_stdout = String::from_utf8_lossy(&codex_search.get_output().stdout);
+    let _codex_stdout = String::from_utf8_lossy(&codex_search.get_output().stdout);
 
     // Search for Claude content
     let claude_search = cargo_bin_cmd!("cass")
@@ -278,7 +277,7 @@ fn tui_headless_multi_agent_index_and_search() {
         .assert()
         .success();
 
-    let claude_stdout = String::from_utf8_lossy(&claude_search.get_output().stdout);
+    let _claude_stdout = String::from_utf8_lossy(&claude_search.get_output().stdout);
 
     // TUI should work with multi-agent data
     cargo_bin_cmd!("cass")
