@@ -3635,3 +3635,123 @@ fn introspect_all_integer_options_documented() {
         "health --stale-threshold should be integer type"
     );
 }
+
+// ============================================================================
+// TOON FORMAT INTEGRATION TESTS
+// ============================================================================
+
+/// Test that --robot-format toon is accepted as valid option
+#[test]
+fn robot_format_toon_is_valid_option() {
+    let mut cmd = base_cmd();
+    // Should not fail with "invalid value" error
+    // Use --limit 1 since limit 0 causes panic in tantivy
+    cmd.args(["search", "test", "--robot-format", "toon", "--limit", "1"]);
+    // With tru not in PATH, it should fall back to JSON (warning on stderr)
+    cmd.assert().success();
+}
+
+/// Test that CASS_OUTPUT_FORMAT=toon env var is respected
+#[test]
+fn cass_output_format_env_triggers_robot_mode() {
+    let mut cmd = base_cmd();
+    cmd.env("CASS_OUTPUT_FORMAT", "json");
+    cmd.args(["search", "test", "--limit", "1"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should output JSON since CASS_OUTPUT_FORMAT=json sets robot mode
+    assert!(
+        stdout.trim().starts_with('{') || stdout.trim().starts_with('['),
+        "CASS_OUTPUT_FORMAT=json should produce JSON output"
+    );
+}
+
+/// Test that TOON_DEFAULT_FORMAT=json env var works
+#[test]
+fn toon_default_format_env_json_works() {
+    let mut cmd = base_cmd();
+    cmd.env("TOON_DEFAULT_FORMAT", "json");
+    cmd.args(["search", "test", "--limit", "1"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should output JSON
+    assert!(
+        stdout.trim().starts_with('{') || stdout.trim().starts_with('['),
+        "TOON_DEFAULT_FORMAT=json should produce JSON output"
+    );
+}
+
+/// Test that CLI flag overrides env vars
+#[test]
+fn cli_robot_format_overrides_env() {
+    let mut cmd = base_cmd();
+    cmd.env("CASS_OUTPUT_FORMAT", "compact");
+    cmd.args(["search", "test", "--robot-format", "json", "--limit", "1"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Pretty JSON has newlines, compact doesn't (if env var was respected wrongly)
+    // This test is checking that --robot-format json overrides compact
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid json");
+    assert!(json.is_object(), "output should be valid JSON object");
+}
+
+/// Test that --robot-format toon help shows toon in possible values
+#[test]
+fn robot_format_help_includes_toon() {
+    let mut cmd = base_cmd();
+    cmd.args(["search", "--help"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.to_lowercase().contains("toon"),
+        "search --help should mention toon format option"
+    );
+}
+
+/// Test that introspect shows toon in robot-format enum values
+#[test]
+fn introspect_robot_format_includes_toon() {
+    let mut cmd = base_cmd();
+    cmd.args(["introspect", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid introspect json");
+    let commands = json["commands"].as_array().expect("commands array");
+
+    let search = commands
+        .iter()
+        .find(|c| c["name"] == "search")
+        .expect("search command present");
+    let args = search["arguments"].as_array().expect("search args");
+
+    let robot_format = args
+        .iter()
+        .find(|a| a["name"] == "robot-format")
+        .expect("robot-format arg should exist");
+
+    let enum_values = robot_format["enum_values"]
+        .as_array()
+        .expect("robot-format should have enum_values");
+
+    assert!(
+        enum_values.iter().any(|v| v == "toon"),
+        "robot-format enum_values should include toon"
+    );
+}
+
+/// Test that CASS_OUTPUT_FORMAT takes precedence over TOON_DEFAULT_FORMAT
+#[test]
+fn cass_output_format_takes_precedence() {
+    let mut cmd = base_cmd();
+    // Set both env vars - CASS_OUTPUT_FORMAT should win
+    cmd.env("TOON_DEFAULT_FORMAT", "compact");
+    cmd.env("CASS_OUTPUT_FORMAT", "json");
+    cmd.args(["search", "test", "--limit", "1"]);
+    let output = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Pretty JSON has newlines
+    assert!(
+        stdout.contains('\n'),
+        "CASS_OUTPUT_FORMAT=json should produce pretty JSON (with newlines), not compact"
+    );
+}

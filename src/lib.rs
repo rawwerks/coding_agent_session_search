@@ -249,6 +249,34 @@ pub enum Commands {
         /// Search mode: lexical (default), semantic, or hybrid
         #[arg(long, value_enum)]
         mode: Option<crate::search::query::SearchMode>,
+
+        // ==========================================================================
+        // Model / Reranker / Daemon flags (bd-3bbv)
+        // ==========================================================================
+        /// Embedding model to use for semantic search.
+        /// Available models depend on what's been downloaded.
+        /// Use `cass models --list` to see available options.
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Enable reranking of search results for improved relevance.
+        /// Requires a reranker model to be available.
+        #[arg(long, default_value_t = false)]
+        rerank: bool,
+
+        /// Reranker model to use (requires --rerank).
+        /// Use `cass models --list` to see available options.
+        #[arg(long)]
+        reranker: Option<String>,
+
+        /// Use daemon for warm model inference (faster repeated queries).
+        /// If daemon is unavailable, falls back to direct inference.
+        #[arg(long, default_value_t = false)]
+        daemon: bool,
+
+        /// Disable daemon usage even if available (force direct inference).
+        #[arg(long, default_value_t = false)]
+        no_daemon: bool,
     },
     /// Show statistics about indexed data
     Stats {
@@ -860,6 +888,8 @@ pub enum RobotFormat {
     Compact,
     /// Session paths only: one source_path per line (for chained searches)
     Sessions,
+    /// Token-Optimized Object Notation (pipes JSON through tru binary)
+    Toon,
 }
 
 /// Human-readable display format for CLI output (non-JSON)
@@ -2026,7 +2056,33 @@ async fn execute_cli(
                     source,
                     sessions_from,
                     mode,
+                    model,
+                    rerank,
+                    reranker,
+                    daemon,
+                    no_daemon,
                 } => {
+                    // Validate mutually exclusive flags
+                    if daemon && no_daemon {
+                        return Err(CliError::usage(
+                            "Cannot specify both --daemon and --no-daemon",
+                            Some("Use --daemon to enable daemon or --no-daemon to disable it".to_string()),
+                        ));
+                    }
+
+                    // Warn about reranker without rerank flag
+                    if reranker.is_some() && !rerank {
+                        eprintln!("Warning: --reranker specified but --rerank not enabled; reranker will be ignored");
+                    }
+
+                    // Build semantic options from new flags
+                    let semantic_opts = SemanticSearchOptions {
+                        model: model.clone(),
+                        rerank,
+                        reranker: reranker.clone(),
+                        use_daemon: daemon && !no_daemon,
+                    };
+
                     run_cli_search(
                         &query,
                         &agent,
@@ -2063,6 +2119,7 @@ async fn execute_cli(
                         source,
                         sessions_from,
                         mode,
+                        semantic_opts,
                     )?;
                 }
                 Commands::Stats {
@@ -2771,13 +2828,18 @@ fn describe_command(cli: &Cli) -> String {
 /// Returns true if the command is using robot/JSON output mode.
 /// Used to auto-suppress INFO logs for clean machine-parseable output.
 fn is_robot_mode(command: &Commands) -> bool {
+    // Check for env var defaults that would trigger robot mode
+    let env_robot_mode = std::env::var("CASS_OUTPUT_FORMAT")
+        .or_else(|_| std::env::var("TOON_DEFAULT_FORMAT"))
+        .is_ok();
+
     match command {
         Commands::Search {
             json,
             robot_format,
             robot_meta,
             ..
-        } => *json || robot_format.is_some() || *robot_meta,
+        } => *json || robot_format.is_some() || *robot_meta || env_robot_mode,
         Commands::Index { json, .. } => *json,
         Commands::Stats { json, .. } => *json,
         Commands::Diag { json, .. } => *json,
@@ -3343,6 +3405,22 @@ pub struct TimeFilter {
     pub until: Option<i64>,
 }
 
+/// Semantic search options from CLI flags (bd-3bbv)
+///
+/// These options control model selection, reranking, and daemon usage
+/// for semantic search operations.
+#[derive(Debug, Clone, Default)]
+pub struct SemanticSearchOptions {
+    /// Embedding model to use (overrides config/default)
+    pub model: Option<String>,
+    /// Enable reranking of results
+    pub rerank: bool,
+    /// Reranker model to use (if rerank is enabled)
+    pub reranker: Option<String>,
+    /// Use daemon for warm model inference
+    pub use_daemon: bool,
+}
+
 impl TimeFilter {
     pub fn new(
         days: Option<u32>,
@@ -3523,6 +3601,7 @@ fn run_cli_search(
     source: Option<String>,
     sessions_from: Option<String>,
     mode: Option<crate::search::query::SearchMode>,
+    semantic_opts: SemanticSearchOptions,
 ) -> CliResult<()> {
     use crate::search::query::{QueryExplanation, SearchClient, SearchFilters, SearchMode};
     use crate::search::tantivy::index_dir;
@@ -3619,9 +3698,32 @@ fn run_cli_search(
     }
 
     // Determine the effective output format
-    // Priority: robot_format > json flag > display format > default plain
+    // Priority: robot_format CLI > json flag > CASS_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > robot_auto > None
     let effective_robot = robot_format
         .or(if *json { Some(RobotFormat::Json) } else { None })
+        .or_else(|| {
+            // Check CASS_OUTPUT_FORMAT env var
+            std::env::var("CASS_OUTPUT_FORMAT").ok().and_then(|val| {
+                match val.to_lowercase().as_str() {
+                    "json" => Some(RobotFormat::Json),
+                    "jsonl" => Some(RobotFormat::Jsonl),
+                    "compact" => Some(RobotFormat::Compact),
+                    "sessions" => Some(RobotFormat::Sessions),
+                    "toon" => Some(RobotFormat::Toon),
+                    _ => None,
+                }
+            })
+        })
+        .or_else(|| {
+            // Check TOON_DEFAULT_FORMAT env var (global fallback)
+            std::env::var("TOON_DEFAULT_FORMAT").ok().and_then(|val| {
+                match val.to_lowercase().as_str() {
+                    "toon" => Some(RobotFormat::Toon),
+                    "json" => Some(RobotFormat::Json),
+                    _ => None,
+                }
+            })
+        })
         .or({
             if robot_auto {
                 Some(RobotFormat::Json)
@@ -3694,6 +3796,25 @@ fn run_cli_search(
 
     // Determine effective search mode (default to Lexical)
     let effective_mode = mode.unwrap_or(SearchMode::Lexical);
+
+    // Log semantic options if any are set (bd-3bbv: flags are wired, infra pending)
+    if semantic_opts.model.is_some()
+        || semantic_opts.rerank
+        || semantic_opts.reranker.is_some()
+        || semantic_opts.use_daemon
+    {
+        tracing::debug!(
+            model = ?semantic_opts.model,
+            rerank = semantic_opts.rerank,
+            reranker = ?semantic_opts.reranker,
+            use_daemon = semantic_opts.use_daemon,
+            "Semantic search options configured"
+        );
+
+        // TODO(bd-2mbe): Wire model selection to embedder registry
+        // TODO(bd-2t2d): Implement reranking stage
+        // TODO(bd-1lps): Implement daemon client integration
+    }
 
     let result = match effective_mode {
         SearchMode::Lexical => client
@@ -4604,6 +4725,151 @@ fn output_robot_results(
                 retryable: false,
             })?;
             println!("{out}");
+        }
+        RobotFormat::Toon => {
+            // TOON: Token-Optimized Object Notation
+            // Pipes JSON through tru binary for token-efficient output
+            let mut payload = serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "offset": offset,
+                "count": filtered_hits.len(),
+                "total_matches": total_matches,
+                "hits": filtered_hits,
+                "max_tokens": max_tokens,
+                "request_id": request_id,
+                "cursor": input_cursor,
+                "hits_clamped": hits_clamped,
+            });
+
+            // Add suggestions if present
+            if !result.suggestions.is_empty()
+                && let serde_json::Value::Object(ref mut map) = payload
+            {
+                map.insert(
+                    "suggestions".to_string(),
+                    serde_json::to_value(&result.suggestions).unwrap_or_default(),
+                );
+            }
+
+            // Add aggregations if present
+            if let (Some(agg), serde_json::Value::Object(map)) = (&agg_json, &mut payload) {
+                map.insert("aggregations".to_string(), agg.clone());
+            }
+
+            // Add query explanation if requested
+            if let (Some(exp), serde_json::Value::Object(map)) = (explanation, &mut payload) {
+                map.insert(
+                    "explanation".to_string(),
+                    serde_json::to_value(exp).unwrap_or_default(),
+                );
+            }
+
+            if include_meta && let serde_json::Value::Object(ref mut map) = payload {
+                let mut meta = serde_json::json!({
+                    "elapsed_ms": elapsed_ms,
+                    "search_mode": search_mode,
+                    "wildcard_fallback": result.wildcard_fallback,
+                    "tokens_estimated": tokens_estimated,
+                    "max_tokens": max_tokens,
+                    "request_id": request_id,
+                    "next_cursor": next_cursor,
+                    "hits_clamped": hits_clamped,
+                });
+                if let Some(state) = state_meta
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("state".to_string(), state);
+                }
+                if let Some(freshness) = index_freshness
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("index_freshness".to_string(), freshness);
+                }
+                if let Some(timeout) = timeout_ms
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("timeout_ms".to_string(), serde_json::json!(timeout));
+                    m.insert("timed_out".to_string(), serde_json::json!(timed_out));
+                    if timed_out {
+                        m.insert("partial_results".to_string(), serde_json::json!(true));
+                    }
+                }
+                map.insert("_meta".to_string(), meta);
+                if let Some(warn) = &warning {
+                    map.insert(
+                        "_warning".to_string(),
+                        serde_json::Value::String(warn.clone()),
+                    );
+                }
+                if timed_out {
+                    map.insert(
+                        "_timeout".to_string(),
+                        serde_json::json!({
+                            "code": 10,
+                            "kind": "timeout",
+                            "message": format!("Operation exceeded timeout of {}ms", timeout_ms.unwrap_or(0)),
+                            "retryable": true,
+                            "partial_results": true
+                        }),
+                    );
+                }
+            }
+
+            let json_str = serde_json::to_string(&payload).map_err(|e| CliError {
+                code: 9,
+                kind: "encode-json",
+                message: format!("failed to encode json: {e}"),
+                hint: None,
+                retryable: false,
+            })?;
+
+            // Find tru binary: TOON_TRU_BIN > TOON_BIN > PATH lookup
+            let tru_bin = std::env::var("TOON_TRU_BIN")
+                .or_else(|_| std::env::var("TOON_BIN"))
+                .unwrap_or_else(|_| "tru".to_string());
+
+            // Pipe JSON through tru --encode
+            match std::process::Command::new(&tru_bin)
+                .arg("--encode")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        if let Err(e) = stdin.write_all(json_str.as_bytes()) {
+                            warn!("tru stdin write failed: {e}, falling back to JSON");
+                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                            return Ok(());
+                        }
+                        drop(stdin); // Close stdin to signal EOF to tru
+                    }
+                    match child.wait_with_output() {
+                        Ok(output) if output.status.success() => {
+                            let toon_str = String::from_utf8_lossy(&output.stdout);
+                            print!("{toon_str}");
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            warn!("tru encode failed (exit {:?}): {stderr}, falling back to JSON", output.status.code());
+                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                        }
+                        Err(e) => {
+                            warn!("tru wait failed: {e}, falling back to JSON");
+                            println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                        }
+                    }
+                }
+                Err(e) => {
+                    // tru not found or failed to spawn - fall back to JSON with warning
+                    warn!("tru binary not found or failed to spawn: {e}, falling back to JSON");
+                    eprintln!("[warn] tru binary not found, outputting JSON. Install: brew install dicklesworthstone/tap/tru");
+                    println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_default());
+                }
+            }
         }
         RobotFormat::Sessions => {
             unreachable!("RobotFormat::Sessions is handled above to avoid building hit payloads");
