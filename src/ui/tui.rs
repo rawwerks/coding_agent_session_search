@@ -1573,6 +1573,21 @@ fn agent_suggestions(prefix: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// Returns workspace suggestions matching the given substring (case-insensitive)
+fn workspace_suggestions(input: &str, known_workspaces: &[String]) -> Vec<String> {
+    if input.is_empty() {
+        // Return all workspaces when input is empty (up to a reasonable limit)
+        return known_workspaces.iter().take(10).cloned().collect();
+    }
+    let input_lower = input.to_lowercase();
+    known_workspaces
+        .iter()
+        .filter(|ws| ws.to_lowercase().contains(&input_lower))
+        .take(10)
+        .cloned()
+        .collect()
+}
+
 /// Suggests a correction for a query based on history.
 /// Uses Levenshtein distance to find close matches (max edit distance 2).
 /// Only suggests if the history item is different from the query.
@@ -2587,6 +2602,13 @@ pub fn run_tui(
     // If DB doesn't exist yet (first run), this will be None, which is fine as we can't view details anyway.
     let db_reader = crate::storage::sqlite::SqliteStorage::open_readonly(&db_path).ok();
 
+    // Load known workspaces for autocomplete suggestions
+    let known_workspaces: Vec<String> = db_reader
+        .as_ref()
+        .and_then(|db| db.list_workspaces().ok())
+        .map(|wss| wss.into_iter().map(|w| w.path.to_string_lossy().to_string()).collect())
+        .unwrap_or_default();
+
     let index_ready = search_client.is_some();
     let mut status = if index_ready {
         format!(
@@ -3028,7 +3050,7 @@ pub fn run_tui(
                     .margin(1)
                     .constraints(
                         [
-                            Constraint::Length(3), // search bar (includes filter chips)
+                            Constraint::Length(6), // search bar (includes filter chips + input when filtering)
                             Constraint::Min(0),    // results + detail
                             Constraint::Length(3), // footer (query display + status + help strip)
                         ]
@@ -3053,7 +3075,7 @@ pub fn run_tui(
                     .direction(Direction::Vertical)
                     .constraints(
                         [
-                            Constraint::Length(2), // input
+                            Constraint::Length(4), // input (taller for filter mode visibility)
                             Constraint::Length(1), // pills
                             Constraint::Length(1), // breadcrumbs
                         ]
@@ -4228,7 +4250,7 @@ pub fn run_tui(
                     if !suggestions.is_empty() {
                         let area = Rect::new(
                             chunks[0].x + 14, // Align with " Filter: Agent " prompt
-                            chunks[0].y + 2,  // Below title line
+                            chunks[0].y + 4,  // Below input area (adjusted for taller layout)
                             30,
                             (suggestions.len().min(5) as u16) + 2,
                         );
@@ -4243,6 +4265,33 @@ pub fn run_tui(
                                     .borders(Borders::ALL)
                                     .border_style(palette.border_focus_style())
                                     .title("Suggestions"),
+                            )
+                            .highlight_style(Style::default().bg(palette.accent));
+                        f.render_widget(list, area);
+                    }
+                }
+
+                // Render autocomplete dropdown for Workspace Filter
+                if input_mode == InputMode::Workspace {
+                    let ws_suggestions = workspace_suggestions(&input_buffer, &known_workspaces);
+                    if !ws_suggestions.is_empty() {
+                        let area = Rect::new(
+                            chunks[0].x + 14, // Align with " Filter: Workspace " prompt
+                            chunks[0].y + 4,  // Below input area
+                            50,
+                            (ws_suggestions.len().min(5) as u16) + 2,
+                        );
+                        f.render_widget(ratatui::widgets::Clear, area);
+                        let items: Vec<ListItem> = ws_suggestions
+                            .iter()
+                            .map(|s| ListItem::new(Span::raw(s.as_str())))
+                            .collect();
+                        let list = List::new(items)
+                            .block(
+                                Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(palette.border_focus_style())
+                                    .title("Workspaces"),
                             )
                             .highlight_style(Style::default().bg(palette.accent));
                         f.render_widget(list, area);
@@ -6824,6 +6873,14 @@ pub fn run_tui(
                         input_buffer.clear();
                         status = "Workspace filter cancelled".to_string();
                     }
+                    KeyCode::Tab => {
+                        // Tab completes to first matching workspace suggestion
+                        let ws_suggestions = workspace_suggestions(&input_buffer, &known_workspaces);
+                        if let Some(first) = ws_suggestions.first() {
+                            input_buffer = first.clone();
+                            status = format!("Completed to '{}'. Press Enter to apply.", first);
+                        }
+                    }
                     KeyCode::Enter => {
                         filters.workspaces.clear();
                         if !input_buffer.trim().is_empty() {
@@ -8147,6 +8204,37 @@ mod tests {
     fn agent_suggestions_empty_prefix_returns_all() {
         let suggestions = agent_suggestions("");
         assert_eq!(suggestions.len(), KNOWN_AGENTS.len());
+    }
+
+    #[test]
+    fn workspace_suggestions_substring_matching() {
+        let known = vec![
+            "/home/user/projects/foo".to_string(),
+            "/home/user/projects/bar".to_string(),
+            "/tmp/test".to_string(),
+        ];
+        let suggestions = workspace_suggestions("proj", &known);
+        assert_eq!(suggestions.len(), 2);
+        assert!(suggestions.iter().any(|s| s.contains("foo")));
+        assert!(suggestions.iter().any(|s| s.contains("bar")));
+    }
+
+    #[test]
+    fn workspace_suggestions_case_insensitive() {
+        let known = vec!["/home/User/Projects".to_string()];
+        let suggestions = workspace_suggestions("PROJ", &known);
+        assert_eq!(suggestions.len(), 1);
+    }
+
+    #[test]
+    fn workspace_suggestions_empty_returns_all() {
+        let known = vec![
+            "/a".to_string(),
+            "/b".to_string(),
+            "/c".to_string(),
+        ];
+        let suggestions = workspace_suggestions("", &known);
+        assert_eq!(suggestions.len(), 3);
     }
 
     // ==========================================================================

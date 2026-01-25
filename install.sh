@@ -130,17 +130,19 @@ mkdir -p "$DEST"
 OS=$(uname -s | tr 'A-Z' 'a-z')
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64|amd64) ARCH="x86_64" ;;
-  arm64|aarch64) ARCH="aarch64" ;;
+  x86_64|amd64) ARCH="amd64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
   *) warn "Unknown arch $ARCH, using as-is" ;;
 esac
 
 TARGET=""
+EXT="tar.gz"
 case "${OS}-${ARCH}" in
-  linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
-  linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-  darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
-  darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
+  linux-amd64) TARGET="linux-amd64" ;;
+  linux-arm64) TARGET="linux-arm64" ;;
+  darwin-amd64) TARGET="darwin-amd64" ;;
+  darwin-arm64) TARGET="darwin-arm64" ;;
+  mingw*-amd64|msys*-amd64|cygwin*-amd64) TARGET="windows-amd64"; EXT="zip" ;;
   *) :;;
 esac
 
@@ -152,7 +154,7 @@ if [ "$FROM_SOURCE" -eq 0 ]; then
     TAR=$(basename "$ARTIFACT_URL")
     URL="$ARTIFACT_URL"
   elif [ -n "$TARGET" ]; then
-    TAR="coding-agent-search-${TARGET}.tar.xz"
+    TAR="cass-${TARGET}.${EXT}"
     URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
   else
     warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
@@ -235,13 +237,25 @@ echo "$CHECKSUM  $TMP/$TAR" | sha256sum -c - || { err "Checksum mismatch"; exit 
 ok "Checksum verified"
 
 info "Extracting"
-tar -xf "$TMP/$TAR" -C "$TMP"
+case "$TAR" in
+  *.zip) unzip -q "$TMP/$TAR" -d "$TMP" ;;
+  *.tar.gz) tar -xzf "$TMP/$TAR" -C "$TMP" ;;
+  *.tar.xz) tar -xJf "$TMP/$TAR" -C "$TMP" ;;
+  *) tar -xf "$TMP/$TAR" -C "$TMP" ;;
+esac
 BIN="$TMP/cass"
 if [ ! -x "$BIN" ] && [ -n "$TARGET" ]; then
-  BIN="$TMP/coding-agent-search-${TARGET}/cass"
+  BIN="$TMP/cass-${TARGET}/cass"
 fi
 if [ ! -x "$BIN" ]; then
   BIN=$(find "$TMP" -maxdepth 3 -type f -name "cass" -perm -111 | head -n 1)
+fi
+# Check for Windows .exe
+if [ ! -x "$BIN" ] && [ -f "$TMP/cass.exe" ]; then
+  BIN="$TMP/cass.exe"
+fi
+if [ ! -x "$BIN" ] && [ -n "$TARGET" ] && [ -f "$TMP/cass-${TARGET}/cass.exe" ]; then
+  BIN="$TMP/cass-${TARGET}/cass.exe"
 fi
 # Fallback for older versions or if name mismatch?
 if [ ! -x "$BIN" ]; then
