@@ -38,7 +38,7 @@ mod styles;
 mod template;
 
 // Re-export public API
-pub use encryption::{EncryptionError, EncryptionKey, encrypt_content};
+pub use encryption::{EncryptedContent, EncryptionError, EncryptionParams, encrypt_content};
 pub use filename::{FilenameOptions, generate_filename};
 pub use renderer::{RenderError, RenderOptions, render_conversation};
 pub use scripts::{ScriptBundle, generate_scripts};

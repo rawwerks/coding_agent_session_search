@@ -2,6 +2,7 @@ pub mod bookmarks;
 pub mod connectors;
 pub mod encryption;
 pub mod export;
+pub mod html_export;
 pub mod indexer;
 pub mod model;
 pub mod pages;
