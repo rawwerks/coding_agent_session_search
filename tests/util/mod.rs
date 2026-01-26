@@ -1,3 +1,5 @@
+pub mod e2e_log;
+
 use coding_agent_search::connectors::{
     NormalizedConversation, NormalizedMessage, NormalizedSnippet,
 };

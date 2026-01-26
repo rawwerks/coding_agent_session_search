@@ -266,25 +266,113 @@ Push to a branch and let GitHub Actions run them:
 
 ---
 
-## Logging and Reports
+## E2E Logging Infrastructure
 
-### Structured Test Output
+### Unified JSONL Schema
 
-Tests that produce output should use JSON format:
+All E2E test infrastructure emits structured JSONL logs following a unified schema. This enables consistent log aggregation, CI integration, and debugging across all test runners.
 
-```bash
-# E2E scripts should output JSONL
-./scripts/daemon/cass_daemon_e2e.sh 2>&1 | tee test-results/daemon_e2e.jsonl
+**Schema Documentation:** `test-results/e2e/SCHEMA.md`
+
+**Event Types:**
+- `run_start` - Test run begins, captures environment metadata
+- `test_start` - Individual test begins
+- `test_end` - Individual test completes (with status, duration, errors)
+- `run_end` - Test run completes with summary statistics
+- `log` - General log messages (INFO, WARN, ERROR, DEBUG)
+- `phase_start`/`phase_end` - Multi-phase run tracking
+
+### Logger Implementations
+
+| Runner | Implementation | Output |
+|--------|---------------|--------|
+| Rust E2E | `tests/util/e2e_log.rs` | `test-results/e2e/rust_*.jsonl` |
+| Shell scripts | `scripts/lib/e2e_log.sh` | `test-results/e2e/shell_*.jsonl` |
+| Playwright | `tests/e2e/reporters/jsonl-reporter.ts` | `test-results/e2e/playwright_*.jsonl` |
+
+### Rust E2E Logger
+
+```rust
+use crate::util::e2e_log::E2eLogger;
+
+let logger = E2eLogger::new("my_test", None)?;
+logger.run_start(None)?;
+
+logger.test_start("test_name", "suite_name", Some("file.rs"), Some(42))?;
+// ... run test ...
+logger.test_pass("test_name", "suite_name", duration_ms)?;
+
+logger.run_end(total, passed, failed, skipped, duration_ms)?;
 ```
 
-### Test Reports
+### Shell Script Logger
+
+```bash
+source scripts/lib/e2e_log.sh
+
+e2e_init "shell" "my_script"
+e2e_run_start
+
+e2e_test_start "test_name" "suite_name"
+# ... run test ...
+e2e_test_pass "test_name" "suite_name" "$duration_ms"
+
+e2e_run_end "$total" "$passed" "$failed" "$skipped" "$duration_ms"
+```
+
+### Orchestrated E2E Runner
+
+The unified test runner executes all E2E suites and produces consolidated reports:
+
+```bash
+# Run all E2E suites
+./scripts/tests/run_all.sh
+
+# Run specific suites
+./scripts/tests/run_all.sh --rust-only
+./scripts/tests/run_all.sh --shell-only
+./scripts/tests/run_all.sh --playwright-only
+
+# Control options
+./scripts/tests/run_all.sh --fail-fast   # Stop on first failure
+./scripts/tests/run_all.sh --verbose     # Show detailed output
+```
+
+**Outputs:**
+- `test-results/e2e/*.jsonl` - Per-suite JSONL logs
+- `test-results/e2e/combined.jsonl` - Aggregated JSONL from all suites
+- `test-results/e2e/summary.md` - Human-readable Markdown summary
+
+### Parsing JSONL Logs
+
+```bash
+# Count failures across all suites
+jq -s '[.[] | select(.event == "test_end" and .result.status == "fail")] | length' \
+  test-results/e2e/*.jsonl
+
+# Get failed test names
+jq -r 'select(.event == "test_end" and .result.status == "fail") | .test.name' \
+  test-results/e2e/*.jsonl
+
+# Duration by runner
+jq -s 'group_by(.runner) | map({runner: .[0].runner, total_ms: [.[] | select(.event == "run_end") | .summary.duration_ms] | add})' \
+  test-results/e2e/*.jsonl
+```
+
+---
+
+## Test Reports
 
 Generated reports go in `test-results/`:
 
-- `no_mock_audit.md` - Mock pattern audit
-- `no_mock_allowlist.json` - Approved exceptions
-- `e2e/*.jsonl` - E2E run logs
-- `e2e/summary.md` - Human-readable summary
+| File | Description |
+|------|-------------|
+| `no_mock_audit.md` | Mock pattern audit results |
+| `no_mock_allowlist.json` | Approved mock exceptions |
+| `e2e/SCHEMA.md` | E2E logging schema documentation |
+| `e2e/*.jsonl` | Per-suite JSONL logs |
+| `e2e/combined.jsonl` | Aggregated JSONL from all suites |
+| `e2e/summary.md` | Human-readable E2E summary |
 
 ---
 
@@ -319,6 +407,11 @@ fn test_parsing() { }
 - `AGENTS.md` - Agent guidelines (E2E browser test policy)
 - `test-results/no_mock_audit.md` - Current mock audit
 - `test-results/no_mock_allowlist.json` - Approved exceptions
+- `test-results/e2e/SCHEMA.md` - Unified E2E logging schema
+- `scripts/tests/run_all.sh` - Orchestrated E2E runner
+- `scripts/lib/e2e_log.sh` - Shell E2E logging library
+- `tests/util/e2e_log.rs` - Rust E2E logging module
+- `tests/e2e/reporters/jsonl-reporter.ts` - Playwright JSONL reporter
 - `.github/workflows/` - CI workflow definitions
 
 ---

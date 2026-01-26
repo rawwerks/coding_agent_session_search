@@ -22,6 +22,7 @@ export default defineConfig({
     ['list'],
     ['json', { outputFile: 'e2e-results.json' }],
     ['html', { outputFolder: 'e2e-report', open: 'never' }],
+    ['./e2e/reporters/jsonl-reporter.ts'],
   ],
 
   timeout: 60000,
