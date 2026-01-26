@@ -10196,7 +10196,9 @@ fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
         });
 
         let tool_output = inner.get("tool_output").map(|o| {
-            if let Some(s) = o.as_str() {
+            if o.is_object() || o.is_array() {
+                serde_json::to_string_pretty(o).unwrap_or_default()
+            } else if let Some(s) = o.as_str() {
                 s.to_string()
             } else {
                 o.to_string()
@@ -10237,17 +10239,27 @@ fn extract_tool_call(msg: &serde_json::Value) -> Option<html_export::ToolCall> {
                 match block_type {
                     "tool_use" => {
                         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                        let input = block.get("input");
+                        let input = block.get("input").map(|i| {
+                            if i.is_object() || i.is_array() {
+                                serde_json::to_string_pretty(i).unwrap_or_default()
+                            } else if let Some(s) = i.as_str() {
+                                s.to_string()
+                            } else {
+                                i.to_string()
+                            }
+                        });
                         return Some(html_export::ToolCall {
                             name: name.to_string(),
-                            input: input.map(|i| i.to_string()).unwrap_or_default(),
+                            input: input.unwrap_or_default(),
                             output: None,
                             status: Some(html_export::ToolStatus::Pending),
                         });
                     }
                     "tool_result" => {
                         let content = block.get("content").map(|c| {
-                            if let Some(s) = c.as_str() {
+                            if c.is_object() || c.is_array() {
+                                serde_json::to_string_pretty(c).unwrap_or_default()
+                            } else if let Some(s) = c.as_str() {
                                 s.to_string()
                             } else {
                                 c.to_string()
