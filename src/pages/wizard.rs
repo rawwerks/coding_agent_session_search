@@ -13,6 +13,7 @@ use crate::pages::confirmation::{
     ConfirmationConfig, ConfirmationFlow, ConfirmationStep, PasswordStrengthAction, StepValidation,
     UNENCRYPTED_ACK_PHRASE, unencrypted_warning_lines, validate_unencrypted_ack,
 };
+use crate::pages::deploy_cloudflare::{CloudflareConfig, CloudflareDeployer};
 use crate::pages::docs::{DocConfig, DocumentationGenerator};
 use crate::pages::encrypt::EncryptionEngine;
 use crate::pages::export::{ExportEngine, ExportFilter, PathMode};
@@ -1823,18 +1824,131 @@ impl PagesWizard {
                     style("→").cyan()
                 )?;
 
-                // TODO: Actually deploy using pages::deploy_cloudflare
-                writeln!(
-                    term,
-                    "  {} Cloudflare Pages deployment not yet implemented",
-                    style("⚠").yellow()
-                )?;
-                writeln!(term)?;
-                writeln!(
-                    term,
-                    "To deploy manually, use wrangler to deploy the {} directory.",
-                    self.state.output_dir.display()
-                )?;
+                // Determine project name from repo_name or use default
+                let project_name = self
+                    .state
+                    .repo_name
+                    .clone()
+                    .unwrap_or_else(|| "cass-archive".to_string());
+
+                // Configure the deployer
+                let deployer = CloudflareDeployer::new(CloudflareConfig {
+                    project_name: project_name.clone(),
+                    custom_domain: None,
+                    create_if_missing: true,
+                    branch: "main".to_string(),
+                    account_id: std::env::var("CLOUDFLARE_ACCOUNT_ID").ok(),
+                    api_token: std::env::var("CLOUDFLARE_API_TOKEN").ok(),
+                });
+
+                // Check prerequisites first
+                match deployer.check_prerequisites() {
+                    Ok(prereqs) if prereqs.is_ready() => {
+                        // Deploy with progress output
+                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
+                            let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
+                        }) {
+                            Ok(result) => {
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "  {} Deployed to Cloudflare Pages!",
+                                    style("✓").green().bold()
+                                )?;
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "  Your archive is available at: {}",
+                                    style(&result.pages_url).cyan().bold()
+                                )?;
+                                if let Some(ref domain) = result.custom_domain {
+                                    writeln!(
+                                        term,
+                                        "  Custom domain: {}",
+                                        style(domain).cyan()
+                                    )?;
+                                }
+                            }
+                            Err(e) => {
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "  {} Deployment failed: {}",
+                                    style("✗").red(),
+                                    e
+                                )?;
+                                writeln!(term)?;
+                                writeln!(
+                                    term,
+                                    "To deploy manually, use wrangler to deploy the {} directory:",
+                                    self.state.output_dir.display()
+                                )?;
+                                writeln!(
+                                    term,
+                                    "  {}",
+                                    style(format!(
+                                        "wrangler pages deploy {} --project-name {}",
+                                        self.state.output_dir.display(),
+                                        project_name
+                                    ))
+                                    .dim()
+                                )?;
+                            }
+                        }
+                    }
+                    Ok(prereqs) => {
+                        let missing = prereqs.missing();
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "  {} Prerequisites not met:",
+                            style("⚠").yellow()
+                        )?;
+                        for item in &missing {
+                            writeln!(term, "    {} {}", style("•").dim(), item)?;
+                        }
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "To deploy manually after meeting prerequisites:"
+                        )?;
+                        writeln!(
+                            term,
+                            "  {}",
+                            style(format!(
+                                "wrangler pages deploy {} --project-name {}",
+                                self.state.output_dir.display(),
+                                project_name
+                            ))
+                            .dim()
+                        )?;
+                    }
+                    Err(e) => {
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "  {} Could not check prerequisites: {}",
+                            style("⚠").yellow(),
+                            e
+                        )?;
+                        writeln!(term)?;
+                        writeln!(
+                            term,
+                            "To deploy manually, use wrangler to deploy the {} directory:",
+                            self.state.output_dir.display()
+                        )?;
+                        writeln!(
+                            term,
+                            "  {}",
+                            style(format!(
+                                "wrangler pages deploy {} --project-name {}",
+                                self.state.output_dir.display(),
+                                project_name
+                            ))
+                            .dim()
+                        )?;
+                    }
+                }
             }
         }
 
