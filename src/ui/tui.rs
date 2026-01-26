@@ -47,7 +47,7 @@ use crate::ui::components::palette::{self, PaletteAction, PaletteState};
 use crate::ui::components::pills::{self, Pill};
 use crate::ui::components::theme::ThemePalette;
 use crate::ui::components::toast::{Toast, ToastManager, render_toasts};
-use crate::ui::components::widgets::search_bar;
+use crate::ui::components::widgets::{search_bar, score_indicator};
 use crate::ui::data::{ConversationView, InputMode, load_conversation, role_style};
 use crate::ui::shortcuts;
 use crate::update_check::{
@@ -289,57 +289,6 @@ struct AgentPane {
     selected: usize,
     /// Total number of results for this agent (may be more than `hits.len()` due to limit)
     total_count: usize,
-}
-
-/// Returns style modifiers based on score magnitude.
-/// High scores (>8) get bold, medium scores (>5) normal, low scores dimmed.
-fn score_style(score: f32) -> Modifier {
-    if score >= 8.0 {
-        Modifier::BOLD
-    } else if score >= 5.0 {
-        Modifier::empty()
-    } else {
-        Modifier::DIM
-    }
-}
-
-/// Creates a refined visual score indicator: `●●●●○ 8.2`
-/// Uses 5 dots proportional to score (0-10 scale) with premium styling.
-fn score_bar(score: f32, palette: ThemePalette) -> Vec<Span<'static>> {
-    use crate::ui::components::theme::colors;
-
-    let normalized = (score / 10.0).clamp(0.0, 1.0);
-    let filled = (normalized * 5.0).round() as usize;
-    let empty = 5 - filled;
-
-    // Premium color based on score tier
-    let color = if score >= 8.0 {
-        colors::STATUS_SUCCESS
-    } else if score >= 5.0 {
-        palette.accent
-    } else {
-        palette.hint
-    };
-
-    let modifier = score_style(score);
-
-    vec![
-        Span::styled(
-            "●".repeat(filled),
-            Style::default().fg(color).add_modifier(modifier),
-        ),
-        Span::styled(
-            "○".repeat(empty),
-            Style::default()
-                .fg(palette.hint)
-                .add_modifier(Modifier::DIM),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{score:.1}"),
-            Style::default().fg(color).add_modifier(modifier),
-        ),
-    ]
 }
 
 /// Linear interpolation between two u8 values.
@@ -1709,45 +1658,53 @@ fn contextual_snippet(text: &str, query: &str, window: ContextWindow) -> String 
     if text.is_empty() {
         return String::new();
     }
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    if len <= size {
+
+    // Use chars count to check length without allocation
+    let char_count = text.chars().count();
+    if char_count <= size {
         return text.to_string();
     }
 
     let trimmed_query = query.trim();
-    let mut char_pos: usize = 0;
+    let mut start_char_idx = 0;
 
     if !trimmed_query.is_empty() {
-        if text.is_ascii() && trimmed_query.is_ascii() {
-            // ASCII fast path: byte offsets are safe
-            let lowercase = text.to_lowercase();
-            let q = trimmed_query.to_lowercase();
-            let byte_pos = lowercase.find(&q).or_else(|| {
-                q.split_whitespace()
-                    .next()
-                    .and_then(|first| lowercase.find(first))
-            });
-            if let Some(b) = byte_pos {
-                char_pos = b.min(text.len());
+        // Optimization: avoid huge allocations for case-insensitive search on large texts
+        // Limit full lowercasing to 100KB
+        if text.len() < 100_000 {
+            let lower = text.to_lowercase();
+            let q_lower = trimmed_query.to_lowercase();
+            // Try to match the first term of the query
+            let first_term = q_lower.split_whitespace().next().unwrap_or(&q_lower);
+
+            if let Some(b) = lower.find(first_term) {
+                // Map byte index to char index
+                // Note: lower indices might slightly differ from original for complex unicode,
+                // but this is approximate for visual centering anyway.
+                let match_char_idx = lower[..b].chars().count();
+                start_char_idx = match_char_idx.saturating_sub(size / 2);
             }
         } else {
-            // Unicode-safe: fall back to case-sensitive search on original text
+            // For huge texts, fall back to case-sensitive search to avoid huge allocation
             let first_term = trimmed_query
                 .split_whitespace()
-                .find(|s| !s.is_empty())
+                .next()
                 .unwrap_or(trimmed_query);
             if let Some(b) = text.find(first_term) {
-                char_pos = text[..b].chars().count();
+                let match_char_idx = text[..b].chars().count();
+                start_char_idx = match_char_idx.saturating_sub(size / 2);
             }
         }
     }
 
-    let start = char_pos.saturating_sub(size / 2);
-    let end = (start + size).min(len);
-    let slice: String = chars[start..end].iter().collect();
-    let prefix = if start > 0 { "…" } else { "" };
-    let suffix = if end < len { "…" } else { "" };
+    // Ensure we don't go out of bounds
+    if start_char_idx + size > char_count {
+        start_char_idx = char_count.saturating_sub(size);
+    }
+
+    let slice: String = text.chars().skip(start_char_idx).take(size).collect();
+    let prefix = if start_char_idx > 0 { "…" } else { "" };
+    let suffix = if start_char_idx + size < char_count { "…" } else { "" };
     format!("{prefix}{slice}{suffix}")
 }
 
@@ -3472,7 +3429,7 @@ pub fn run_tui(
                                     format!("@{} ", pane.agent),
                                     Style::default().fg(palette.hint),
                                 ));
-                                header_spans.extend(score_bar(hit.score, palette));
+                                header_spans.extend(score_indicator(hit.score, palette));
                                 header_spans.push(Span::raw(" "));
                                 header_spans.push(Span::styled(
                                     title.to_string(),
