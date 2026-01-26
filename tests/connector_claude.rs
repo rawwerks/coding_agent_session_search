@@ -4,13 +4,17 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+// Migration note: Using "fixture-claude" naming instead of legacy "fixture-claude".
+// See tests/fixtures/connectors/MANIFEST.json for provenance tracking.
+const FIXTURE_DIR_NAME: &str = "fixture-claude";
+
 #[test]
 fn claude_parses_project_fixture() {
     // Setup isolated environment with "claude" in path to satisfy detector
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture_src =
         PathBuf::from("tests/fixtures/claude_code_real/projects/-test-project/agent-test123.jsonl");
-    let fixture_dest_dir = tmp.path().join("mock-claude/projects/test-project");
+    let fixture_dest_dir = tmp.path().join("fixture-claude/projects/test-project");
     std::fs::create_dir_all(&fixture_dest_dir).unwrap();
     let fixture_dest = fixture_dest_dir.join("agent-test123.jsonl");
     std::fs::copy(&fixture_src, &fixture_dest).expect("copy fixture");
@@ -18,7 +22,7 @@ fn claude_parses_project_fixture() {
     // Run scan on temp dir
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -49,7 +53,7 @@ fn create_claude_temp() -> TempDir {
 #[test]
 fn claude_connector_parses_jsonl_format() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -60,7 +64,7 @@ fn claude_connector_parses_jsonl_format() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -87,7 +91,7 @@ fn claude_connector_parses_jsonl_format() {
 #[test]
 fn claude_connector_parses_message_type_entries() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -98,7 +102,7 @@ fn claude_connector_parses_message_type_entries() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -117,7 +121,7 @@ fn claude_connector_parses_message_type_entries() {
 #[test]
 fn claude_connector_filters_summary_entries() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -130,7 +134,7 @@ fn claude_connector_filters_summary_entries() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -149,7 +153,7 @@ fn claude_connector_filters_summary_entries() {
 #[test]
 fn claude_connector_extracts_model_as_author() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -160,7 +164,7 @@ fn claude_connector_extracts_model_as_author() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -175,7 +179,7 @@ fn claude_connector_extracts_model_as_author() {
 #[test]
 fn claude_connector_flattens_tool_use() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -186,7 +190,7 @@ fn claude_connector_flattens_tool_use() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -203,7 +207,7 @@ fn claude_connector_flattens_tool_use() {
 #[test]
 fn claude_connector_extracts_title_from_user() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -214,7 +218,7 @@ fn claude_connector_extracts_title_from_user() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -227,7 +231,7 @@ fn claude_connector_extracts_title_from_user() {
 #[test]
 fn claude_connector_title_fallback_to_workspace() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -238,7 +242,7 @@ fn claude_connector_title_fallback_to_workspace() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -252,7 +256,7 @@ fn claude_connector_title_fallback_to_workspace() {
 #[test]
 fn claude_connector_skips_malformed_lines() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -265,7 +269,7 @@ also not json
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -278,7 +282,7 @@ also not json
 #[test]
 fn claude_connector_filters_empty_content() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -290,7 +294,7 @@ fn claude_connector_filters_empty_content() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -305,7 +309,7 @@ fn claude_connector_filters_empty_content() {
 #[test]
 fn claude_connector_assigns_sequential_indices() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -317,7 +321,7 @@ fn claude_connector_assigns_sequential_indices() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -335,7 +339,7 @@ fn claude_connector_assigns_sequential_indices() {
 #[test]
 fn claude_connector_handles_multiple_files() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     for i in 1..=3 {
@@ -349,7 +353,7 @@ fn claude_connector_handles_multiple_files() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -361,7 +365,7 @@ fn claude_connector_handles_multiple_files() {
 #[test]
 fn claude_connector_parses_json_format() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("conversation.json");
 
@@ -376,7 +380,7 @@ fn claude_connector_parses_json_format() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -392,7 +396,7 @@ fn claude_connector_parses_json_format() {
 #[test]
 fn claude_connector_parses_claude_extension() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("conversation.claude");
 
@@ -406,7 +410,7 @@ fn claude_connector_parses_claude_extension() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -419,12 +423,12 @@ fn claude_connector_parses_claude_extension() {
 #[test]
 fn claude_connector_handles_empty_directory() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects");
+    let projects = dir.path().join("fixture-claude/projects");
     fs::create_dir_all(&projects).unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -436,7 +440,7 @@ fn claude_connector_handles_empty_directory() {
 #[test]
 fn claude_connector_sets_external_id() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("unique-session-id.jsonl");
 
@@ -446,7 +450,7 @@ fn claude_connector_sets_external_id() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -462,7 +466,7 @@ fn claude_connector_sets_external_id() {
 #[test]
 fn claude_connector_sets_source_path() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -472,7 +476,7 @@ fn claude_connector_sets_source_path() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -485,7 +489,7 @@ fn claude_connector_sets_source_path() {
 #[test]
 fn claude_connector_parses_timestamps() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -496,7 +500,7 @@ fn claude_connector_parses_timestamps() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -514,7 +518,7 @@ fn claude_connector_parses_timestamps() {
 #[test]
 fn claude_connector_truncates_long_title() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -527,7 +531,7 @@ fn claude_connector_truncates_long_title() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -541,7 +545,7 @@ fn claude_connector_truncates_long_title() {
 #[test]
 fn claude_connector_ignores_other_extensions() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Valid file
@@ -563,7 +567,7 @@ fn claude_connector_ignores_other_extensions() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -575,7 +579,7 @@ fn claude_connector_ignores_other_extensions() {
 #[test]
 fn claude_connector_handles_nested_projects() {
     let dir = create_claude_temp();
-    let nested = dir.path().join("mock-claude/projects/org/team/project");
+    let nested = dir.path().join("fixture-claude/projects/org/team/project");
     fs::create_dir_all(&nested).unwrap();
     let file = nested.join("session.jsonl");
 
@@ -585,7 +589,7 @@ fn claude_connector_handles_nested_projects() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -598,7 +602,7 @@ fn claude_connector_handles_nested_projects() {
 #[test]
 fn claude_connector_uses_entry_type_as_role() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -609,7 +613,7 @@ fn claude_connector_uses_entry_type_as_role() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -627,7 +631,7 @@ fn claude_connector_uses_entry_type_as_role() {
 #[test]
 fn connector_handles_various_timezone_formats() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -640,7 +644,7 @@ fn connector_handles_various_timezone_formats() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -667,7 +671,7 @@ fn connector_handles_various_timezone_formats() {
 #[test]
 fn connector_handles_epoch_and_iso_timestamps() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
 
@@ -679,7 +683,7 @@ fn connector_handles_epoch_and_iso_timestamps() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -709,7 +713,7 @@ fn connector_symlinked_directories_not_followed_by_default() {
     fs::write(&file, sample).unwrap();
 
     // Create symlink pointing to actual data
-    let mock_claude = dir.path().join("mock-claude");
+    let mock_claude = dir.path().join("fixture-claude");
     fs::create_dir_all(&mock_claude).unwrap();
     let symlink_path = mock_claude.join("projects");
     symlink(dir.path().join("actual-data/projects"), &symlink_path).unwrap();
@@ -745,14 +749,14 @@ fn connector_follows_symlinked_files() {
     fs::write(&actual_file, sample).unwrap();
 
     // Create directory structure with symlinked file
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let symlink_path = projects.join("session.jsonl");
     symlink(&actual_file, &symlink_path).unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -773,7 +777,7 @@ fn connector_handles_unreadable_files() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create a readable file first
@@ -795,7 +799,7 @@ fn connector_handles_unreadable_files() {
         if fs::read_to_string(&unreadable_file).is_err() {
             let conn = ClaudeCodeConnector::new();
             let ctx = ScanContext {
-                data_dir: dir.path().join("mock-claude"),
+                data_dir: dir.path().join("fixture-claude"),
                 scan_roots: Vec::new(),
                 since_ts: None,
             };
@@ -825,7 +829,7 @@ fn connector_handles_long_file_paths() {
     let dir = create_claude_temp();
 
     // Create a deeply nested path (but not exceeding filesystem limits)
-    let mut deep_path = dir.path().join("mock-claude/projects");
+    let mut deep_path = dir.path().join("fixture-claude/projects");
     for i in 0..10 {
         deep_path = deep_path.join(format!("level{}", i));
     }
@@ -837,7 +841,7 @@ fn connector_handles_long_file_paths() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -852,7 +856,7 @@ fn connector_handles_special_chars_in_paths() {
     let dir = create_claude_temp();
     let projects = dir
         .path()
-        .join("mock-claude/projects/test-proj with spaces");
+        .join("fixture-claude/projects/test-proj with spaces");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
     let sample = r#"{"type":"user","message":{"role":"user","content":"Spaces in path"},"timestamp":"2025-11-12T18:31:18.000Z"}
@@ -861,7 +865,7 @@ fn connector_handles_special_chars_in_paths() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -874,7 +878,7 @@ fn connector_handles_special_chars_in_paths() {
 #[test]
 fn connector_handles_unicode_in_paths() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/项目-テスト");
+    let projects = dir.path().join("fixture-claude/projects/项目-テスト");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
     let sample = r#"{"type":"user","message":{"role":"user","content":"Unicode path"},"timestamp":"2025-11-12T18:31:18.000Z"}
@@ -883,7 +887,7 @@ fn connector_handles_unicode_in_paths() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -896,13 +900,13 @@ fn connector_handles_unicode_in_paths() {
 #[test]
 fn connector_handles_empty_project_dirs() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/empty-proj");
+    let projects = dir.path().join("fixture-claude/projects/empty-proj");
     fs::create_dir_all(&projects).unwrap();
     // Don't create any files
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -915,7 +919,7 @@ fn connector_handles_empty_project_dirs() {
 #[test]
 fn connector_respects_since_ts_filter() {
     let dir = create_claude_temp();
-    let projects = dir.path().join("mock-claude/projects/test-proj");
+    let projects = dir.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     let file = projects.join("session.jsonl");
     let sample = r#"{"type":"user","message":{"role":"user","content":"Hello"},"timestamp":"2025-11-12T18:31:18.000Z"}
@@ -934,7 +938,7 @@ fn connector_respects_since_ts_filter() {
 
     // First scan without filter should find the file
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -943,7 +947,7 @@ fn connector_respects_since_ts_filter() {
 
     // Scan with since_ts in the future (by 1 hour = 3600000 ms) should find nothing
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: Some(mtime_millis + 3_600_000), // 1 hour in the future
     };
@@ -952,7 +956,7 @@ fn connector_respects_since_ts_filter() {
 
     // Scan with since_ts in the past (by 1 hour) should find the file
     let ctx = ScanContext {
-        data_dir: dir.path().join("mock-claude"),
+        data_dir: dir.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: Some(mtime_millis - 3_600_000), // 1 hour in the past
     };

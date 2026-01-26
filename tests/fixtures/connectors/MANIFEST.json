@@ -1,0 +1,55 @@
+{
+  "version": "1.0.0",
+  "generated_at": "2026-01-26",
+  "description": "Provenance manifest for connector test fixtures",
+  "fixtures": {
+    "claude": {
+      "source": "tests/fixtures/claude_code_real",
+      "capture_date": "2025-11-25",
+      "redaction_policy": "usernames_anonymized",
+      "content_hash": "sha256:pending",
+      "files": [
+        {
+          "path": "projects/-test-project/agent-test123.jsonl",
+          "description": "Real Claude Code session with matrix completion discussion",
+          "message_count": 2,
+          "captured_from": "anonymous_developer_session"
+        }
+      ]
+    },
+    "codex": {
+      "source": "tests/fixtures/codex_real",
+      "capture_date": "2025-11-25",
+      "redaction_policy": "usernames_anonymized",
+      "content_hash": "sha256:pending",
+      "files": []
+    },
+    "aider": {
+      "source": "tests/fixtures/aider",
+      "capture_date": "2025-12-01",
+      "redaction_policy": "paths_sanitized",
+      "content_hash": "sha256:pending",
+      "files": []
+    }
+  },
+  "synthetic_fixtures": {
+    "note": "Some tests require synthetic data for edge cases (malformed JSON, encoding errors). These are documented below.",
+    "allowed_synthetic": [
+      {
+        "test_file": "tests/parse_errors.rs",
+        "reason": "Tests malformed JSONL handling - requires intentionally broken content",
+        "patterns": ["invalid JSON", "truncated line", "missing fields"]
+      },
+      {
+        "test_file": "tests/fs_errors.rs",
+        "reason": "Tests filesystem edge cases - requires dynamic file creation",
+        "patterns": ["permission errors", "symlinks", "long paths"]
+      }
+    ]
+  },
+  "naming_convention": {
+    "temp_dir_prefix": "fixture-",
+    "legacy_prefix": "mock-",
+    "migration_note": "All new tests should use 'fixture-<agent>' naming instead of 'mock-<agent>'"
+  }
+}

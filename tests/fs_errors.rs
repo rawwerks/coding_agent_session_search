@@ -26,7 +26,7 @@ fn scan_nonexistent_directory_handles_gracefully() {
     let tmp = TempDir::new().unwrap();
     // Make the path "look like" a Claude root so the connector doesn't fall back to
     // scanning the real ~/.claude directory on developer machines.
-    let nonexistent = tmp.path().join("mock-claude");
+    let nonexistent = tmp.path().join("fixture-claude");
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
@@ -48,7 +48,7 @@ fn scan_nonexistent_directory_handles_gracefully() {
 #[test]
 fn file_deleted_mid_scan_handles_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create a valid file
@@ -64,7 +64,7 @@ fn file_deleted_mid_scan_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -82,12 +82,12 @@ fn file_deleted_mid_scan_handles_gracefully() {
 #[test]
 fn empty_directory_returns_no_conversations() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects");
+    let projects = tmp.path().join("fixture-claude/projects");
     fs::create_dir_all(&projects).unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -101,13 +101,13 @@ fn empty_directory_returns_no_conversations() {
 #[test]
 fn missing_session_file_in_project() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
     // Don't create session.jsonl
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -125,7 +125,7 @@ fn missing_session_file_in_project() {
 #[test]
 fn symlink_to_valid_file_is_followed() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create actual file in a different location
@@ -144,7 +144,7 @@ fn symlink_to_valid_file_is_followed() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -162,7 +162,7 @@ fn symlink_to_valid_file_is_followed() {
 #[test]
 fn broken_symlink_is_handled_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create symlink to non-existent file
@@ -171,7 +171,7 @@ fn broken_symlink_is_handled_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -188,7 +188,7 @@ fn broken_symlink_is_handled_gracefully() {
 #[test]
 fn symlink_to_directory_is_followed() {
     let tmp = TempDir::new().unwrap();
-    let mock_claude = tmp.path().join("mock-claude");
+    let mock_claude = tmp.path().join("fixture-claude");
     fs::create_dir_all(&mock_claude).unwrap();
 
     // Create actual project directory elsewhere
@@ -228,7 +228,7 @@ fn symlink_to_directory_is_followed() {
 #[test]
 fn directory_named_like_session_file() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create a directory named session.jsonl
@@ -236,7 +236,7 @@ fn directory_named_like_session_file() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -253,7 +253,7 @@ fn directory_named_like_session_file() {
 #[test]
 fn zero_byte_file_handles_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create empty file (0 bytes)
@@ -261,7 +261,7 @@ fn zero_byte_file_handles_gracefully() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -276,14 +276,14 @@ fn zero_byte_file_handles_gracefully() {
 #[test]
 fn newlines_only_file_handles_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     fs::write(projects.join("session.jsonl"), "\n\n\n\n\n").unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -302,7 +302,7 @@ fn newlines_only_file_handles_gracefully() {
 #[test]
 fn path_with_spaces_is_handled() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/project with spaces");
+    let projects = tmp.path().join("fixture-claude/projects/project with spaces");
     fs::create_dir_all(&projects).unwrap();
 
     fs::write(
@@ -313,7 +313,7 @@ fn path_with_spaces_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -328,7 +328,7 @@ fn path_with_spaces_is_handled() {
 #[test]
 fn path_with_unicode_is_handled() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/项目-émoji-🚀");
+    let projects = tmp.path().join("fixture-claude/projects/项目-émoji-🚀");
     fs::create_dir_all(&projects).unwrap();
 
     fs::write(
@@ -339,7 +339,7 @@ fn path_with_unicode_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -354,7 +354,7 @@ fn path_with_unicode_is_handled() {
 #[test]
 fn deeply_nested_directory_is_handled() {
     let tmp = TempDir::new().unwrap();
-    let mut path = tmp.path().join("mock-claude/projects");
+    let mut path = tmp.path().join("fixture-claude/projects");
 
     // Create 20 levels of nesting
     for i in 0..20 {
@@ -370,7 +370,7 @@ fn deeply_nested_directory_is_handled() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -442,7 +442,7 @@ fn codex_handles_missing_sessions_dir() {
 #[test]
 fn error_contains_path_context() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     // Create file with invalid UTF-8
@@ -451,7 +451,7 @@ fn error_contains_path_context() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -469,7 +469,7 @@ fn error_contains_path_context() {
 #[test]
 fn multiple_bad_files_dont_prevent_good_file_processing() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects");
+    let projects = tmp.path().join("fixture-claude/projects");
 
     // Create good project
     let good = projects.join("good-proj");
@@ -495,7 +495,7 @@ fn multiple_bad_files_dont_prevent_good_file_processing() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
@@ -525,7 +525,7 @@ fn multiple_bad_files_dont_prevent_good_file_processing() {
 #[test]
 fn file_readable_with_other_handle() {
     let tmp = TempDir::new().unwrap();
-    let projects = tmp.path().join("mock-claude/projects/test-proj");
+    let projects = tmp.path().join("fixture-claude/projects/test-proj");
     fs::create_dir_all(&projects).unwrap();
 
     let file = projects.join("session.jsonl");
@@ -540,7 +540,7 @@ fn file_readable_with_other_handle() {
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: tmp.path().join("mock-claude"),
+        data_dir: tmp.path().join("fixture-claude"),
         scan_roots: Vec::new(),
         since_ts: None,
     };
