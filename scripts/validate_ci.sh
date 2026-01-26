@@ -31,9 +31,9 @@ elif command -v rg &> /dev/null && command -v jq &> /dev/null; then
     # Use explicit patterns to avoid false positives with -i flag
     # - CamelCase: MockFoo, FakeBar, StubBaz (without -i, exact case)
     # - snake_case: mock_, fake_, stub_ (case insensitive)
-    # Exclude node_modules, target, .git, and fixture files
+    # Exclude node_modules (anywhere), target, .git, and fixture files
     rg -n "(Mock[A-Z][a-z]|Fake[A-Z][a-z]|Stub[A-Z][a-z]|mock_|fake_|stub_)" \
-        --glob '!node_modules/**' \
+        --glob '!**/node_modules/**' \
         --glob '!target/**' \
         --glob '!.git/**' \
         --glob '!tests/fixtures/**' \

@@ -108,31 +108,31 @@
     {
       "path": "tests/e2e_install_easy.rs",
       "pattern": "fake_bin",
-      "rationale": "TRANSITIONAL: Fake binaries for install testing - scheduled for removal",
+      "rationale": "PERMANENT: Fast local test for install.sh script logic. Real install verification runs in CI via .github/workflows/install-test.yml with actual Rust tooling",
       "owner": "infra-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-30qg",
-      "transitional": true
+      "review_date": "2026-07-26",
+      "permanent": true,
+      "note": "Fake rustc/cargo/sha256sum binaries allow fast isolated testing of install script logic. Full real-world install testing runs in CI workflow install-test.yml on Linux and macOS"
     },
     {
       "path": "src/sources/install.rs",
       "pattern": "mock_system_info",
-      "rationale": "TRANSITIONAL: Mock system info for install recommendation tests",
+      "rationale": "PERMANENT: Fixture constructor for testing pure install method selection logic with deterministic inputs",
       "owner": "sources-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-30qg",
+      "review_date": "2026-07-26",
       "cfg_test_only": true,
-      "transitional": true
+      "permanent": true,
+      "note": "Creates test SystemInfo struct for unit testing choose_method() and related pure functions. Not a mock - just structured test data"
     },
     {
       "path": "src/sources/install.rs",
       "pattern": "mock_resources",
-      "rationale": "TRANSITIONAL: Mock resource info for install recommendation tests",
+      "rationale": "PERMANENT: Fixture constructor for testing pure resource checking logic with deterministic inputs",
       "owner": "sources-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-30qg",
+      "review_date": "2026-07-26",
       "cfg_test_only": true,
-      "transitional": true
+      "permanent": true,
+      "note": "Creates test ResourceInfo struct for unit testing check_resources() and can_compile(). Not a mock - just structured test data"
     },
     {
       "path": "src/sources/interactive.rs",
@@ -159,15 +159,6 @@
       "owner": "connectors-team",
       "review_date": "2026-03-26",
       "downstream_task": "bd-1dfc",
-      "transitional": true
-    },
-    {
-      "path": "tests/semantic_integration.rs",
-      "pattern": "fake_model",
-      "rationale": "TRANSITIONAL: Fake ONNX model file for semantic testing",
-      "owner": "search-team",
-      "review_date": "2026-03-26",
-      "downstream_task": "bd-a63y",
       "transitional": true
     },
     {

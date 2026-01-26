@@ -1,3 +1,30 @@
+//! E2E Install Easy Mode Test
+//!
+//! This test validates install.sh logic using lightweight fixture binaries.
+//! It uses fake rustc/cargo binaries to skip rustup checks, allowing fast
+//! isolated testing of the install script logic (checksum verification,
+//! unpacking, path setup).
+//!
+//! ## Real Install Testing
+//!
+//! Full real-world install testing with actual Rust tooling runs in CI via:
+//! `.github/workflows/install-test.yml`
+//!
+//! The CI workflow:
+//! - Builds a real release binary
+//! - Creates a tarball with SHA256 checksum
+//! - Runs install.sh with real rustc/cargo/sha256sum
+//! - Verifies the installed binary works
+//! - Uploads structured logs as artifacts
+//!
+//! ## Allowlist Status
+//!
+//! The fake binaries in this test are permanently allowlisted per the no-mock
+//! policy (see `test-results/no_mock_allowlist.json`) because:
+//! 1. They test install script logic in isolation
+//! 2. Real CI coverage exists via install-test.yml
+//! 3. Local iteration speed is preserved
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
