@@ -14,7 +14,9 @@
 //! - **[`model_manager`]**: Semantic model detection + context wiring (no downloads).
 //! - **[`model_download`]**: Model download system with consent, verification, and atomic install.
 //! - **[`canonicalize`]**: Text preprocessing for consistent embedding input.
+//! - **[`ann_index`]**: HNSW-based approximate nearest neighbor index (Opt 9).
 
+pub mod ann_index;
 pub mod canonicalize;
 pub mod daemon_client;
 pub mod embedder;
