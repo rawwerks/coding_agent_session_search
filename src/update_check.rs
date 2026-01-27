@@ -304,7 +304,7 @@ pub fn run_self_update(version: &str) -> ! {
                 "Bypass",
                 "-Command",
                 &format!(
-                    "Invoke-WebRequest -Uri '{}' -UseBasicParsing | Invoke-Expression; install.ps1 -EasyMode -Version {}",
+                    "& $([scriptblock]::Create((Invoke-WebRequest -Uri '{}' -UseBasicParsing).Content)) -EasyMode -Version {}",
                     install_url, version
                 ),
             ])
