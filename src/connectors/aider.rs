@@ -170,23 +170,23 @@ impl Connector for AiderConnector {
             }
         };
 
-        let data_root = if ctx
-            .data_dir
-            .file_name()
-            .is_some_and(|n| n == ".aider.chat.history.md")
-        {
-            ctx.data_dir
-                .parent()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| ctx.data_dir.clone())
-        } else {
-            ctx.data_dir.clone()
-        };
-
-        // Check if data_root is actually the CASS DB directory
-        let is_cass_db_dir = data_root.join("agent_search.db").exists();
-
         if ctx.use_default_detection() {
+            let data_root = if ctx
+                .data_dir
+                .file_name()
+                .is_some_and(|n| n == ".aider.chat.history.md")
+            {
+                ctx.data_dir
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| ctx.data_dir.clone())
+            } else {
+                ctx.data_dir.clone()
+            };
+
+            // Check if data_root is actually the CASS DB directory
+            let is_cass_db_dir = data_root.join("agent_search.db").exists();
+
             // Check for override env var first
             if let Ok(override_root) = dotenvy::var("CASS_AIDER_DATA_ROOT")
                 && !override_root.trim().is_empty()
@@ -207,11 +207,11 @@ impl Connector for AiderConnector {
                     add_root(home);
                 }
             }
-        } else if data_root.exists() && data_root.is_dir() {
-            // Explicit root provided - use it for recursive search
-            add_root(data_root);
         } else {
-            return Ok(Vec::new());
+            // Explicit roots provided (e.g. remote mirrors) - use them directly
+            for root in &ctx.scan_roots {
+                add_root(root.path.clone());
+            }
         }
 
         if roots.is_empty() {

@@ -123,13 +123,25 @@ impl CursorConnector {
     fn find_db_files(base: &Path) -> Vec<PathBuf> {
         let mut dbs = Vec::new();
 
-        // Check globalStorage
+        // 1. Check if base itself is a DB (explicit file scan)
+        if base.is_file() && base.file_name().is_some_and(|n| n == "state.vscdb") {
+            dbs.push(base.to_path_buf());
+            return dbs;
+        }
+
+        // 2. Check if base contains state.vscdb directly (e.g. pointing at globalStorage)
+        let direct_db = base.join("state.vscdb");
+        if direct_db.exists() {
+            dbs.push(direct_db);
+        }
+
+        // 3. Check standard layout: globalStorage
         let global_db = base.join("globalStorage/state.vscdb");
         if global_db.exists() {
             dbs.push(global_db);
         }
 
-        // Check workspaceStorage subdirectories
+        // 4. Check standard layout: workspaceStorage subdirectories
         let workspace_storage = base.join("workspaceStorage");
         if workspace_storage.exists() {
             for entry in WalkDir::new(&workspace_storage)
@@ -213,9 +225,20 @@ impl CursorConnector {
     /// Handles file:// and vscode-remote:// URIs.
     fn parse_workspace_uri(uri: &str) -> Option<PathBuf> {
         if let Some(path) = uri.strip_prefix("file://") {
-            // URL decode and return
+            // URL decode
             let decoded = urlencoding::decode(path).ok()?;
-            return Some(PathBuf::from(decoded.into_owned()));
+            let mut path_str = decoded.as_ref();
+
+            // On Windows, file:///C:/... becomes /C:/...
+            // We need to strip the leading slash if it looks like a drive letter
+            if cfg!(windows) && path_str.starts_with('/') && path_str.len() > 2 {
+                let chars: Vec<char> = path_str.chars().collect();
+                if chars[2] == ':' && chars[1].is_ascii_alphabetic() {
+                    path_str = &path_str[1..];
+                }
+            }
+
+            return Some(PathBuf::from(path_str));
         }
 
         // Handle vscode-remote://ssh-remote+{json}/path format
@@ -242,6 +265,9 @@ impl CursorConnector {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .with_context(|| format!("failed to open Cursor db: {}", db_path.display()))?;
+
+        // Set busy timeout to 5 seconds to avoid locking errors when Cursor is running
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let mut convs = Vec::new();
         let mut seen_ids = HashSet::new();
@@ -309,7 +335,7 @@ impl CursorConnector {
         key: &str,
         value: &str,
         db_path: &Path,
-        _since_ts: Option<i64>, // File-level filtering done in scan(); message filtering not needed
+        since_ts: Option<i64>,
         seen_ids: &mut HashSet<String>,
         conn: Option<&Connection>,
     ) -> Option<NormalizedConversation> {
@@ -331,10 +357,6 @@ impl CursorConnector {
         let last_updated_at = val
             .get("lastUpdatedAt")
             .and_then(crate::connectors::parse_timestamp);
-
-        // NOTE: Do NOT filter conversations/messages by timestamp here!
-        // The file-level check in file_modified_since() is sufficient.
-        // Filtering would cause data loss when the file is re-indexed.
 
         let mut messages = Vec::new();
         let mut workspace: Option<PathBuf> = None;
@@ -453,6 +475,18 @@ impl CursorConnector {
         let safe_id = urlencoding::encode(&composer_id);
         let unique_source_path = db_path.join(safe_id.as_ref());
 
+        // Use lastUpdatedAt if available (most accurate), fall back to last message time, then createdAt
+        let ended_at = last_updated_at
+            .or_else(|| messages.last().and_then(|m| m.created_at))
+            .or(created_at);
+
+        // Optimization: Skip conversations not modified since last scan
+        if let (Some(threshold), Some(ts)) = (since_ts, ended_at)
+            && ts < threshold
+        {
+            return None;
+        }
+
         Some(NormalizedConversation {
             agent_slug: "cursor".to_string(),
             external_id: Some(composer_id),
@@ -460,10 +494,7 @@ impl CursorConnector {
             workspace,
             source_path: unique_source_path,
             started_at: created_at,
-            // Use lastUpdatedAt if available (most accurate), fall back to last message time, then createdAt
-            ended_at: last_updated_at
-                .or_else(|| messages.last().and_then(|m| m.created_at))
-                .or(created_at),
+            ended_at,
             metadata: serde_json::json!({
                 "source": "cursor",
                 "model": model_name,
@@ -653,54 +684,61 @@ impl Connector for CursorConnector {
     }
 
     fn scan(&self, ctx: &ScanContext) -> Result<Vec<NormalizedConversation>> {
-        // Determine base directory
+        // Determine base directories to scan
         let looks_like_base = |path: &PathBuf| {
             path.join("globalStorage").exists() || path.join("workspaceStorage").exists()
         };
 
-        let base = if ctx.use_default_detection() {
+        let mut roots: Vec<PathBuf> = Vec::new();
+
+        if ctx.use_default_detection() {
             if looks_like_base(&ctx.data_dir) {
-                ctx.data_dir.clone()
+                roots.push(ctx.data_dir.clone());
             } else if let Some(default_base) = Self::app_support_dir() {
-                default_base
-            } else {
-                return Ok(Vec::new());
+                roots.push(default_base);
             }
         } else {
-            if !looks_like_base(&ctx.data_dir) {
-                return Ok(Vec::new());
+            // Explicit roots provided - use them all
+            for r in &ctx.scan_roots {
+                roots.push(r.path.clone());
             }
-            ctx.data_dir.clone()
-        };
+        }
 
-        if !base.exists() {
+        if roots.is_empty() {
             return Ok(Vec::new());
         }
 
-        let db_files = Self::find_db_files(&base);
         let mut all_convs = Vec::new();
 
-        for db_path in db_files {
-            // Skip files not modified since last scan
-            if !crate::connectors::file_modified_since(&db_path, ctx.since_ts) {
+        for root in roots {
+            if !root.exists() {
                 continue;
             }
 
-            match Self::extract_from_db(&db_path, ctx.since_ts) {
-                Ok(convs) => {
-                    tracing::debug!(
-                        path = %db_path.display(),
-                        count = convs.len(),
-                        "cursor extracted conversations"
-                    );
-                    all_convs.extend(convs);
+            let db_files = Self::find_db_files(&root);
+
+            for db_path in db_files {
+                // Skip files not modified since last scan
+                if !crate::connectors::file_modified_since(&db_path, ctx.since_ts) {
+                    continue;
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %db_path.display(),
-                        error = %e,
-                        "cursor failed to extract from db"
-                    );
+
+                match Self::extract_from_db(&db_path, ctx.since_ts) {
+                    Ok(convs) => {
+                        tracing::debug!(
+                            path = %db_path.display(),
+                            count = convs.len(),
+                            "cursor extracted conversations"
+                        );
+                        all_convs.extend(convs);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %db_path.display(),
+                            error = %e,
+                            "cursor failed to extract from db"
+                        );
+                    }
                 }
             }
         }

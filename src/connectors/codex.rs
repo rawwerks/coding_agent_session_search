@@ -86,274 +86,278 @@ impl Connector for CodexConnector {
             .unwrap_or(false)
             && ctx.data_dir.join("sessions").exists();
 
-        let looks_like_root = |path: &PathBuf| {
-            path.to_str()
-                .map(|s| s.contains(".codex") || s.contains("codex"))
-                .unwrap_or(false)
-                || path.join("sessions").exists()
-        };
-        let mut home = if ctx.use_default_detection() {
+        let roots: Vec<PathBuf> = if ctx.use_default_detection() {
             if is_codex_dir {
-                ctx.data_dir.clone()
+                vec![ctx.data_dir.clone()]
             } else {
-                Self::home()
+                vec![Self::home()]
             }
         } else {
-            if !looks_like_root(&ctx.data_dir) {
-                return Ok(Vec::new());
-            }
-            ctx.data_dir.clone()
+            // Explicit roots (remote mirrors, etc.)
+            ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
         };
-        if home.is_file() {
-            home = home.parent().unwrap_or(&home).to_path_buf();
+
+        if roots.is_empty() {
+            return Ok(Vec::new());
         }
-        let files = Self::rollout_files(&home);
+
         let mut convs = Vec::new();
 
-        for file in files {
-            let source_path = file.clone();
-            // Skip files not modified since last scan (incremental indexing)
-            if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
+        for mut home in roots {
+            if home.is_file() {
+                home = home.parent().unwrap_or(&home).to_path_buf();
+            }
+            if !home.exists() {
                 continue;
             }
-            // Use relative path from sessions dir as external_id for uniqueness
-            // e.g., "2025/11/20/rollout-1" instead of just "rollout-1"
-            let sessions_dir = Self::sessions_dir(&home);
-            let external_id = source_path
-                .strip_prefix(&sessions_dir)
-                .ok()
-                .and_then(|rel| {
-                    rel.with_extension("")
-                        .to_str()
-                        .map(std::string::ToString::to_string)
-                })
-                .or_else(|| {
-                    source_path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(std::string::ToString::to_string)
-                });
-            let ext = file.extension().and_then(|e| e.to_str());
-            let mut messages = Vec::new();
-            let mut started_at = None;
-            let mut ended_at = None;
-            let mut session_cwd: Option<PathBuf> = None;
 
-            if ext == Some("jsonl") {
-                let f = std::fs::File::open(&file)
-                    .with_context(|| format!("open rollout {}", file.display()))?;
-                let reader = std::io::BufReader::new(f);
+            let files = Self::rollout_files(&home);
 
-                // Modern envelope format: each line has {type, timestamp, payload}
-                for line_res in std::io::BufRead::lines(reader) {
-                    let line = match line_res {
-                        Ok(l) => l,
-                        Err(_) => continue,
-                    };
-                    if line.trim().is_empty() {
-                        continue;
+            for file in files {
+                let source_path = file.clone();
+                // Skip files not modified since last scan (incremental indexing)
+                if !crate::connectors::file_modified_since(&file, ctx.since_ts) {
+                    continue;
+                }
+                // Use relative path from sessions dir as external_id for uniqueness
+                // e.g., "2025/11/20/rollout-1" instead of just "rollout-1"
+                let sessions_dir = Self::sessions_dir(&home);
+                let external_id = source_path
+                    .strip_prefix(&sessions_dir)
+                    .ok()
+                    .and_then(|rel| {
+                        rel.with_extension("")
+                            .to_str()
+                            .map(std::string::ToString::to_string)
+                    })
+                    .or_else(|| {
+                        source_path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(std::string::ToString::to_string)
+                    });
+                let ext = file.extension().and_then(|e| e.to_str());
+                let mut messages = Vec::new();
+                let mut started_at = None;
+                let mut ended_at = None;
+                let mut session_cwd: Option<PathBuf> = None;
+
+                if ext == Some("jsonl") {
+                    let f = std::fs::File::open(&file)
+                        .with_context(|| format!("open rollout {}", file.display()))?;
+                    let reader = std::io::BufReader::new(f);
+
+                    // Modern envelope format: each line has {type, timestamp, payload}
+                    for line_res in std::io::BufRead::lines(reader) {
+                        let line = match line_res {
+                            Ok(l) => l,
+                            Err(_) => continue,
+                        };
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let val: Value = match serde_json::from_str(&line) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        let created = val
+                            .get("timestamp")
+                            .and_then(crate::connectors::parse_timestamp);
+
+                        // NOTE: Do NOT filter individual messages by timestamp here!
+                        // The file-level check in file_modified_since() is sufficient.
+                        // Filtering messages would cause older messages to be lost when
+                        // the file is re-indexed after new messages are added.
+
+                        match entry_type {
+                            "session_meta" => {
+                                // Extract workspace from session metadata
+                                if let Some(payload) = val.get("payload") {
+                                    session_cwd = payload
+                                        .get("cwd")
+                                        .and_then(|v| v.as_str())
+                                        .map(PathBuf::from);
+                                }
+                                started_at = started_at.or(created);
+                            }
+                            "response_item" => {
+                                // Main message entries with nested payload
+                                if let Some(payload) = val.get("payload") {
+                                    let role = payload
+                                        .get("role")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("agent");
+
+                                    let content_str = payload
+                                        .get("content")
+                                        .map(crate::connectors::flatten_content)
+                                        .unwrap_or_default();
+
+                                    if content_str.trim().is_empty() {
+                                        continue;
+                                    }
+
+                                    started_at = started_at.or(created);
+                                    ended_at = created.or(ended_at);
+
+                                    messages.push(NormalizedMessage {
+                                        idx: 0, // will be re-assigned after filtering
+                                        role: role.to_string(),
+                                        author: None,
+                                        created_at: created,
+                                        content: content_str,
+                                        extra: val,
+                                        snippets: Vec::new(),
+                                    });
+                                }
+                            }
+                            "event_msg" => {
+                                // Event messages - filter by payload type
+                                if let Some(payload) = val.get("payload") {
+                                    let event_type = payload.get("type").and_then(|v| v.as_str());
+
+                                    match event_type {
+                                        Some("user_message") => {
+                                            let text = payload
+                                                .get("message")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            if !text.is_empty() {
+                                                started_at = started_at.or(created);
+                                                ended_at = created.or(ended_at);
+                                                messages.push(NormalizedMessage {
+                                                    idx: 0, // will be re-assigned after filtering
+                                                    role: "user".to_string(),
+                                                    author: None,
+                                                    created_at: created,
+                                                    content: text.to_string(),
+                                                    extra: val,
+                                                    snippets: Vec::new(),
+                                                });
+                                            }
+                                        }
+                                        Some("agent_reasoning") => {
+                                            // Include reasoning - valuable for search
+                                            let text = payload
+                                                .get("text")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            if !text.is_empty() {
+                                                started_at = started_at.or(created);
+                                                ended_at = created.or(ended_at);
+                                                messages.push(NormalizedMessage {
+                                                    idx: 0, // will be re-assigned after filtering
+                                                    role: "assistant".to_string(),
+                                                    author: Some("reasoning".to_string()),
+                                                    created_at: created,
+                                                    content: text.to_string(),
+                                                    extra: val,
+                                                    snippets: Vec::new(),
+                                                });
+                                            }
+                                        }
+                                        _ => {} // Skip token_count, turn_aborted, etc.
+                                    }
+                                }
+                            }
+                            _ => {} // Skip turn_context and unknown types
+                        }
                     }
-                    let val: Value = match serde_json::from_str(&line) {
+                    // Re-assign sequential indices after filtering
+                    super::reindex_messages(&mut messages);
+                } else if ext == Some("json") {
+                    let content = fs::read_to_string(&file)
+                        .with_context(|| format!("read rollout {}", file.display()))?;
+                    // Legacy format: single JSON object with {session, items}
+                    let val: Value = match serde_json::from_str(&content) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
 
-                    let entry_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let created = val
-                        .get("timestamp")
-                        .and_then(crate::connectors::parse_timestamp);
+                    // Extract workspace from session.cwd
+                    session_cwd = val
+                        .get("session")
+                        .and_then(|s| s.get("cwd"))
+                        .and_then(|v| v.as_str())
+                        .map(PathBuf::from);
 
-                    // NOTE: Do NOT filter individual messages by timestamp here!
-                    // The file-level check in file_modified_since() is sufficient.
-                    // Filtering messages would cause older messages to be lost when
-                    // the file is re-indexed after new messages are added.
+                    // Parse items array
+                    if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
+                        for item in items {
+                            let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
 
-                    match entry_type {
-                        "session_meta" => {
-                            // Extract workspace from session metadata
-                            if let Some(payload) = val.get("payload") {
-                                session_cwd = payload
-                                    .get("cwd")
-                                    .and_then(|v| v.as_str())
-                                    .map(PathBuf::from);
+                            let content_str = item
+                                .get("content")
+                                .map(crate::connectors::flatten_content)
+                                .unwrap_or_default();
+
+                            if content_str.trim().is_empty() {
+                                continue;
                             }
+
+                            let created = item
+                                .get("timestamp")
+                                .and_then(crate::connectors::parse_timestamp);
+
+                            // NOTE: Do NOT filter individual messages by timestamp.
+                            // File-level check is sufficient for incremental indexing.
+
                             started_at = started_at.or(created);
+                            ended_at = created.or(ended_at);
+
+                            messages.push(NormalizedMessage {
+                                idx: 0, // will be re-assigned after filtering
+                                role: role.to_string(),
+                                author: None,
+                                created_at: created,
+                                content: content_str,
+                                extra: item.clone(),
+                                snippets: Vec::new(),
+                            });
                         }
-                        "response_item" => {
-                            // Main message entries with nested payload
-                            if let Some(payload) = val.get("payload") {
-                                let role = payload
-                                    .get("role")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("agent");
-
-                                let content_str = payload
-                                    .get("content")
-                                    .map(crate::connectors::flatten_content)
-                                    .unwrap_or_default();
-
-                                if content_str.trim().is_empty() {
-                                    continue;
-                                }
-
-                                started_at = started_at.or(created);
-                                ended_at = created.or(ended_at);
-
-                                messages.push(NormalizedMessage {
-                                    idx: 0, // will be re-assigned after filtering
-                                    role: role.to_string(),
-                                    author: None,
-                                    created_at: created,
-                                    content: content_str,
-                                    extra: val,
-                                    snippets: Vec::new(),
-                                });
-                            }
-                        }
-                        "event_msg" => {
-                            // Event messages - filter by payload type
-                            if let Some(payload) = val.get("payload") {
-                                let event_type = payload.get("type").and_then(|v| v.as_str());
-
-                                match event_type {
-                                    Some("user_message") => {
-                                        let text = payload
-                                            .get("message")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        if !text.is_empty() {
-                                            started_at = started_at.or(created);
-                                            ended_at = created.or(ended_at);
-                                            messages.push(NormalizedMessage {
-                                                idx: 0, // will be re-assigned after filtering
-                                                role: "user".to_string(),
-                                                author: None,
-                                                created_at: created,
-                                                content: text.to_string(),
-                                                extra: val,
-                                                snippets: Vec::new(),
-                                            });
-                                        }
-                                    }
-                                    Some("agent_reasoning") => {
-                                        // Include reasoning - valuable for search
-                                        let text = payload
-                                            .get("text")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        if !text.is_empty() {
-                                            started_at = started_at.or(created);
-                                            ended_at = created.or(ended_at);
-                                            messages.push(NormalizedMessage {
-                                                idx: 0, // will be re-assigned after filtering
-                                                role: "assistant".to_string(),
-                                                author: Some("reasoning".to_string()),
-                                                created_at: created,
-                                                content: text.to_string(),
-                                                extra: val,
-                                                snippets: Vec::new(),
-                                            });
-                                        }
-                                    }
-                                    _ => {} // Skip token_count, turn_aborted, etc.
-                                }
-                            }
-                        }
-                        _ => {} // Skip turn_context and unknown types
                     }
+                    // Re-assign sequential indices after filtering
+                    super::reindex_messages(&mut messages);
                 }
-                // Re-assign sequential indices after filtering
-                super::reindex_messages(&mut messages);
-            } else if ext == Some("json") {
-                let content = fs::read_to_string(&file)
-                    .with_context(|| format!("read rollout {}", file.display()))?;
-                // Legacy format: single JSON object with {session, items}
-                let val: Value = match serde_json::from_str(&content) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
 
-                // Extract workspace from session.cwd
-                session_cwd = val
-                    .get("session")
-                    .and_then(|s| s.get("cwd"))
-                    .and_then(|v| v.as_str())
-                    .map(PathBuf::from);
-
-                // Parse items array
-                if let Some(items) = val.get("items").and_then(|v| v.as_array()) {
-                    for item in items {
-                        let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("agent");
-
-                        let content_str = item
-                            .get("content")
-                            .map(crate::connectors::flatten_content)
-                            .unwrap_or_default();
-
-                        if content_str.trim().is_empty() {
-                            continue;
-                        }
-
-                        let created = item
-                            .get("timestamp")
-                            .and_then(crate::connectors::parse_timestamp);
-
-                        // NOTE: Do NOT filter individual messages by timestamp.
-                        // File-level check is sufficient for incremental indexing.
-
-                        started_at = started_at.or(created);
-                        ended_at = created.or(ended_at);
-
-                        messages.push(NormalizedMessage {
-                            idx: 0, // will be re-assigned after filtering
-                            role: role.to_string(),
-                            author: None,
-                            created_at: created,
-                            content: content_str,
-                            extra: item.clone(),
-                            snippets: Vec::new(),
-                        });
-                    }
+                if messages.is_empty() {
+                    continue;
                 }
-                // Re-assign sequential indices after filtering
-                super::reindex_messages(&mut messages);
-            }
 
-            if messages.is_empty() {
-                continue;
-            }
+                // Extract title from first user message
+                let title = messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| {
+                        m.content
+                            .lines()
+                            .next()
+                            .unwrap_or(&m.content)
+                            .chars()
+                            .take(100)
+                            .collect::<String>()
+                    })
+                    .or_else(|| {
+                        messages
+                            .first()
+                            .and_then(|m| m.content.lines().next())
+                            .map(|s| s.chars().take(100).collect())
+                    });
 
-            // Extract title from first user message
-            let title = messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| {
-                    m.content
-                        .lines()
-                        .next()
-                        .unwrap_or(&m.content)
-                        .chars()
-                        .take(100)
-                        .collect::<String>()
-                })
-                .or_else(|| {
-                    messages
-                        .first()
-                        .and_then(|m| m.content.lines().next())
-                        .map(|s| s.chars().take(100).collect())
+                convs.push(NormalizedConversation {
+                    agent_slug: "codex".to_string(),
+                    external_id,
+                    title,
+                    workspace: session_cwd, // Now populated from session_meta/session.cwd!
+                    source_path: source_path.clone(),
+                    started_at,
+                    ended_at,
+                    metadata: serde_json::json!({"source": if ext == Some("json") { "rollout_json" } else { "rollout" }}),
+                    messages,
                 });
-
-            convs.push(NormalizedConversation {
-                agent_slug: "codex".to_string(),
-                external_id,
-                title,
-                workspace: session_cwd, // Now populated from session_meta/session.cwd!
-                source_path: source_path.clone(),
-                started_at,
-                ended_at,
-                metadata: serde_json::json!({"source": if ext == Some("json") { "rollout_json" } else { "rollout" }}),
-                messages,
-            });
+            }
         }
 
         Ok(convs)

@@ -51,198 +51,129 @@ impl Connector for ClaudeCodeConnector {
                     .file_name()
                     .is_some_and(|n| n.to_str().unwrap_or("").contains("claude"))
         };
-        let mut root = if ctx.use_default_detection() {
+
+        let roots: Vec<PathBuf> = if ctx.use_default_detection() {
             if looks_like_root(&ctx.data_dir) {
-                ctx.data_dir.clone()
+                vec![ctx.data_dir.clone()]
             } else {
-                Self::projects_root()
+                vec![Self::projects_root()]
             }
         } else {
-            ctx.data_dir.clone()
+            // Explicit roots (remote mirrors, etc.) - trust the configuration
+            ctx.scan_roots.iter().map(|r| r.path.clone()).collect()
         };
-        if root.is_file() {
-            root = root.parent().unwrap_or(&root).to_path_buf();
-        }
-        if !ctx.use_default_detection() && !looks_like_root(&root) {
-            return Ok(Vec::new());
-        }
-        if !root.exists() {
-            return Ok(Vec::new());
-        }
 
         let mut convs = Vec::new();
         let mut file_count = 0;
-        for entry in WalkDir::new(&root).into_iter().flatten() {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let ext = entry.path().extension().and_then(|s| s.to_str());
-            if ext != Some("jsonl") && ext != Some("json") && ext != Some("claude") {
-                continue;
-            }
-            // Skip files not modified since last scan (incremental indexing)
-            if !crate::connectors::file_modified_since(entry.path(), ctx.since_ts) {
-                continue;
-            }
-            file_count += 1;
-            if file_count <= 3 {
-                tracing::debug!(path = %entry.path().display(), "claude_code found file");
-            }
 
-            let mut messages = Vec::new();
-            let mut started_at = None;
-            let mut ended_at = None;
-            // Track workspace from first entry's cwd field
-            let mut workspace: Option<PathBuf> = None;
-            let mut session_id: Option<String> = None;
-            let mut git_branch: Option<String> = None;
-            let mut content_string = String::new();
-
-            if ext == Some("jsonl") {
-                let file = std::fs::File::open(entry.path())
-                    .with_context(|| format!("open {}", entry.path().display()))?;
-                let reader = std::io::BufReader::new(file);
-
-                for line_res in std::io::BufRead::lines(reader) {
-                    let line = match line_res {
-                        Ok(l) => l,
-                        Err(_) => continue,
-                    };
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let val: Value = match serde_json::from_str(&line) {
-                        Ok(v) => v,
-                        Err(_) => continue, // Skip malformed lines
-                    };
-
-                    // Extract session metadata from first available entry
-                    if workspace.is_none() {
-                        workspace = val.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
-                    }
-                    if session_id.is_none() {
-                        session_id = val
-                            .get("sessionId")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                    }
-                    if git_branch.is_none() {
-                        git_branch = val
-                            .get("gitBranch")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                    }
-
-                    // Filter to user/assistant entries only (skip summary, file-history-snapshot, etc.)
-                    let entry_type = val.get("type").and_then(|v| v.as_str());
-                    let role_hint = val
-                        .get("message")
-                        .and_then(|m| m.get("role"))
-                        .and_then(|v| v.as_str())
-                        .or_else(|| val.get("role").and_then(|v| v.as_str()));
-                    let is_user_assistant = matches!(entry_type, Some("user" | "assistant"))
-                        || (entry_type == Some("message")
-                            && matches!(role_hint, Some("user" | "assistant")));
-                    if !is_user_assistant {
-                        continue;
-                    }
-
-                    // Parse ISO-8601 timestamp using shared utility
-                    let created = val
-                        .get("timestamp")
-                        .and_then(crate::connectors::parse_timestamp);
-
-                    // NOTE: Do NOT filter individual messages by timestamp here!
-                    // The file-level check in file_modified_since() is sufficient.
-                    // Filtering messages would cause older messages to be lost when
-                    // the file is re-indexed after new messages are added.
-
-                    started_at = started_at.or(created);
-                    ended_at = created.or(ended_at);
-
-                    // Role from message.role, top-level role, or entry type
-                    let role = role_hint.or(entry_type).unwrap_or("agent");
-
-                    // Content from message.content or top-level content (may be string or array)
-                    let content_val = val
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .or_else(|| val.get("content"));
-                    let content_str = content_val
-                        .map(crate::connectors::flatten_content)
-                        .unwrap_or_default();
-
-                    // Skip entries with empty content
-                    if content_str.trim().is_empty() {
-                        continue;
-                    }
-
-                    // Extract model name for author field
-                    let author = val
-                        .get("message")
-                        .and_then(|m| m.get("model"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-
-                    messages.push(NormalizedMessage {
-                        idx: 0, // will be re-assigned after filtering
-                        role: role.to_string(),
-                        author,
-                        created_at: created,
-                        content: content_str,
-                        extra: val,
-                        snippets: Vec::new(),
-                    });
-                }
-                // Re-assign sequential indices after filtering
-                super::reindex_messages(&mut messages);
+        for root in roots {
+            let scan_target = if root.is_file() {
+                root.parent().unwrap_or(&root).to_path_buf()
             } else {
-                // Safety check: Don't read files larger than 100MB to avoid OOM
-                if let Ok(metadata) = fs::metadata(entry.path())
-                    && metadata.len() > 100 * 1024 * 1024
-                {
-                    tracing::debug!(
-                        path = %entry.path().display(),
-                        size_bytes = metadata.len(),
-                        "skipping large file (>100MB)"
-                    );
+                root.clone()
+            };
+
+            if !scan_target.exists() {
+                continue;
+            }
+
+            for entry in WalkDir::new(&scan_target).into_iter().flatten() {
+                if !entry.file_type().is_file() {
                     continue;
                 }
+                let ext = entry.path().extension().and_then(|s| s.to_str());
+                if ext != Some("jsonl") && ext != Some("json") && ext != Some("claude") {
+                    continue;
+                }
+                // Skip files not modified since last scan (incremental indexing)
+                if !crate::connectors::file_modified_since(entry.path(), ctx.since_ts) {
+                    continue;
+                }
+                file_count += 1;
+                if file_count <= 3 {
+                    tracing::debug!(path = %entry.path().display(), "claude_code found file");
+                }
 
-                content_string = fs::read_to_string(entry.path())
-                    .with_context(|| format!("read {}", entry.path().display()))?;
-                // JSON or Claude format files
-                let val: Value = match serde_json::from_str(&content_string) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::debug!(path = %entry.path().display(), error = %e, "claude_code skipping malformed JSON");
-                        continue;
-                    }
-                };
-                if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
-                    for item in arr {
-                        let role = item
-                            .get("role")
-                            .or_else(|| item.get("type"))
+                let mut messages = Vec::new();
+                let mut started_at = None;
+                let mut ended_at = None;
+                // Track workspace from first entry's cwd field
+                let mut workspace: Option<PathBuf> = None;
+                let mut session_id: Option<String> = None;
+                let mut git_branch: Option<String> = None;
+                let mut content_string = String::new();
+
+                if ext == Some("jsonl") {
+                    let file = std::fs::File::open(entry.path())
+                        .with_context(|| format!("open {}", entry.path().display()))?;
+                    let reader = std::io::BufReader::new(file);
+
+                    for line_res in std::io::BufRead::lines(reader) {
+                        let line = match line_res {
+                            Ok(l) => l,
+                            Err(_) => continue,
+                        };
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let val: Value = match serde_json::from_str(&line) {
+                            Ok(v) => v,
+                            Err(_) => continue, // Skip malformed lines
+                        };
+
+                        // Extract session metadata from first available entry
+                        if workspace.is_none() {
+                            workspace = val.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
+                        }
+                        if session_id.is_none() {
+                            session_id = val
+                                .get("sessionId")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                        }
+                        if git_branch.is_none() {
+                            git_branch = val
+                                .get("gitBranch")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                        }
+
+                        // Filter to user/assistant entries only (skip summary, file-history-snapshot, etc.)
+                        let entry_type = val.get("type").and_then(|v| v.as_str());
+                        let role_hint = val
+                            .get("message")
+                            .and_then(|m| m.get("role"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("agent");
+                            .or_else(|| val.get("role").and_then(|v| v.as_str()));
+                        let is_user_assistant = matches!(entry_type, Some("user" | "assistant"))
+                            || (entry_type == Some("message")
+                                && matches!(role_hint, Some("user" | "assistant")));
+                        if !is_user_assistant {
+                            continue;
+                        }
 
-                        // Use parse_timestamp for consistent handling of both i64 and ISO-8601
-                        let created = item
+                        // Parse ISO-8601 timestamp using shared utility
+                        let created = val
                             .get("timestamp")
-                            .or_else(|| item.get("time"))
                             .and_then(crate::connectors::parse_timestamp);
 
-                        // NOTE: Do NOT filter individual messages by timestamp.
-                        // File-level check is sufficient for incremental indexing.
+                        // NOTE: Do NOT filter individual messages by timestamp here!
+                        // The file-level check in file_modified_since() is sufficient.
+                        // Filtering messages would cause older messages to be lost when
+                        // the file is re-indexed after new messages are added.
 
                         started_at = started_at.or(created);
                         ended_at = created.or(ended_at);
 
-                        // Use flatten_content for consistent handling of both string and array content
-                        let content_str = item
-                            .get("content")
-                            .or_else(|| item.get("text"))
+                        // Role from message.role, top-level role, or entry type
+                        let role = role_hint.or(entry_type).unwrap_or("agent");
+
+                        // Content from message.content or top-level content (may be string or array)
+                        let content_val = val
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .or_else(|| val.get("content"));
+                        let content_str = content_val
                             .map(crate::connectors::flatten_content)
                             .unwrap_or_default();
 
@@ -251,85 +182,160 @@ impl Connector for ClaudeCodeConnector {
                             continue;
                         }
 
+                        // Extract model name for author field
+                        let author = val
+                            .get("message")
+                            .and_then(|m| m.get("model"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+
                         messages.push(NormalizedMessage {
                             idx: 0, // will be re-assigned after filtering
                             role: role.to_string(),
-                            author: None,
+                            author,
                             created_at: created,
                             content: content_str,
-                            extra: item.clone(),
+                            extra: val,
                             snippets: Vec::new(),
                         });
                     }
-                }
-                // Re-assign sequential indices after filtering
-                super::reindex_messages(&mut messages);
-            }
-            if messages.is_empty() {
-                if file_count <= 3 {
-                    tracing::debug!(path = %entry.path().display(), "claude_code no messages extracted");
-                }
-                continue;
-            }
-            tracing::debug!(path = %entry.path().display(), messages = messages.len(), "claude_code extracted messages");
+                    // Re-assign sequential indices after filtering
+                    super::reindex_messages(&mut messages);
+                } else {
+                    // Safety check: Don't read files larger than 100MB to avoid OOM
+                    if let Ok(metadata) = fs::metadata(entry.path())
+                        && metadata.len() > 100 * 1024 * 1024
+                    {
+                        tracing::debug!(
+                            path = %entry.path().display(),
+                            size_bytes = metadata.len(),
+                            "skipping large file (>100MB)"
+                        );
+                        continue;
+                    }
 
-            // Extract title from first user message, truncated to reasonable length
-            let title = if ext == Some("jsonl") {
-                messages
-                    .iter()
-                    .find(|m| m.role == "user")
-                    .map(|m| {
-                        m.content
-                            .lines()
-                            .next()
-                            .unwrap_or(&m.content)
-                            .chars()
-                            .take(100)
-                            .collect::<String>()
-                    })
-                    .or_else(|| {
-                        // Fallback to workspace directory name
-                        workspace
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            .map(String::from)
-                    })
-            } else {
-                serde_json::from_str::<Value>(&content_string)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("title")
-                            .and_then(|t| t.as_str())
-                            .map(std::string::ToString::to_string)
-                    })
-                    .or_else(|| {
-                        messages
-                            .first()
-                            .and_then(|m| m.content.lines().next())
-                            .map(|s| s.chars().take(100).collect())
-                    })
-            };
+                    content_string = fs::read_to_string(entry.path())
+                        .with_context(|| format!("read {}", entry.path().display()))?;
+                    // JSON or Claude format files
+                    let val: Value = match serde_json::from_str(&content_string) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::debug!(path = %entry.path().display(), error = %e, "claude_code skipping malformed JSON");
+                            continue;
+                        }
+                    };
+                    if let Some(arr) = val.get("messages").and_then(|m| m.as_array()) {
+                        for item in arr {
+                            let role = item
+                                .get("role")
+                                .or_else(|| item.get("type"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("agent");
 
-            convs.push(NormalizedConversation {
-                agent_slug: "claude_code".into(),
-                external_id: entry
-                    .path()
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .map(std::string::ToString::to_string),
-                title,
-                workspace, // Now populated from cwd field!
-                source_path: entry.path().to_path_buf(),
-                started_at,
-                ended_at,
-                metadata: serde_json::json!({
-                    "source": "claude_code",
-                    "sessionId": session_id,
-                    "gitBranch": git_branch
-                }),
-                messages,
-            });
+                            // Use parse_timestamp for consistent handling of both i64 and ISO-8601
+                            let created = item
+                                .get("timestamp")
+                                .or_else(|| item.get("time"))
+                                .and_then(crate::connectors::parse_timestamp);
+
+                            // NOTE: Do NOT filter individual messages by timestamp.
+                            // File-level check is sufficient for incremental indexing.
+
+                            started_at = started_at.or(created);
+                            ended_at = created.or(ended_at);
+
+                            // Use flatten_content for consistent handling of both string and array content
+                            let content_str = item
+                                .get("content")
+                                .or_else(|| item.get("text"))
+                                .map(crate::connectors::flatten_content)
+                                .unwrap_or_default();
+
+                            // Skip entries with empty content
+                            if content_str.trim().is_empty() {
+                                continue;
+                            }
+
+                            messages.push(NormalizedMessage {
+                                idx: 0, // will be re-assigned after filtering
+                                role: role.to_string(),
+                                author: None,
+                                created_at: created,
+                                content: content_str,
+                                extra: item.clone(),
+                                snippets: Vec::new(),
+                            });
+                        }
+                    }
+                    // Re-assign sequential indices after filtering
+                    super::reindex_messages(&mut messages);
+                }
+                if messages.is_empty() {
+                    if file_count <= 3 {
+                        tracing::debug!(path = %entry.path().display(), "claude_code no messages extracted");
+                    }
+                    continue;
+                }
+                tracing::debug!(path = %entry.path().display(), messages = messages.len(), "claude_code extracted messages");
+
+                // Extract title from first user message, truncated to reasonable length
+                let title = if ext == Some("jsonl") {
+                    messages
+                        .iter()
+                        .find(|m| m.role == "user")
+                        .map(|m| {
+                            m.content
+                                .lines()
+                                .next()
+                                .unwrap_or(&m.content)
+                                .chars()
+                                .take(100)
+                                .collect::<String>()
+                        })
+                        .or_else(|| {
+                            // Fallback to workspace directory name
+                            workspace
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .map(String::from)
+                        })
+                } else {
+                    serde_json::from_str::<Value>(&content_string)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("title")
+                                .and_then(|t| t.as_str())
+                                .map(std::string::ToString::to_string)
+                        })
+                        .or_else(|| {
+                            messages
+                                .first()
+                                .and_then(|m| m.content.lines().next())
+                                .map(|s| s.chars().take(100).collect())
+                        })
+                };
+
+                convs.push(NormalizedConversation {
+                    agent_slug: "claude_code".into(),
+                    external_id: entry
+                        .path()
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(std::string::ToString::to_string),
+                    title,
+                    workspace, // Now populated from cwd field!
+                    source_path: entry.path().to_path_buf(),
+                    started_at,
+                    ended_at,
+                    metadata: serde_json::json!({
+                        "source": "claude_code",
+                        "sessionId": session_id,
+                        "gitBranch": git_branch
+                    }),
+                    messages,
+                });
+            }
         }
 
         Ok(convs)
@@ -1065,5 +1071,33 @@ mod tests {
         }
         assert_eq!(convs.len(), 1, "Should find session in real home");
         assert_eq!(convs[0].messages[0].content, "Real session");
+    }
+
+    #[test]
+    fn scan_explicit_root_generic_name() {
+        let dir = TempDir::new().unwrap();
+        // Directory name that doesn't contain "claude" and no "projects" subdir
+        let generic_root = dir.path().join("my_logs");
+        fs::create_dir_all(&generic_root).unwrap();
+
+        let session_file = generic_root.join("session.jsonl");
+        let content = r#"{"type":"user","message":{"role":"user","content":"Generic root test"}}"#;
+        fs::write(&session_file, content).unwrap();
+
+        let connector = ClaudeCodeConnector::new();
+        // Create context with explicit root (use_default_detection = false)
+        // Note: ScanContext::with_roots takes data_dir as first arg, but indexer passes root.path there too.
+        // We simulate what indexer does.
+        let roots = vec![crate::connectors::ScanRoot::local(generic_root.clone())];
+        let ctx = ScanContext::with_roots(generic_root.clone(), roots, None);
+
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(
+            convs.len(),
+            1,
+            "Should find session in generic named explicit root"
+        );
+        assert_eq!(convs[0].messages[0].content, "Generic root test");
     }
 }
