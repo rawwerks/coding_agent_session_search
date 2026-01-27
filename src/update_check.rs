@@ -40,10 +40,10 @@ impl UpdateState {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => {
                 let legacy = legacy_state_path();
-                if legacy != path {
-                    if let Ok(content) = std::fs::read_to_string(&legacy) {
-                        return serde_json::from_str(&content).unwrap_or_default();
-                    }
+                if legacy != path
+                    && let Ok(content) = std::fs::read_to_string(&legacy)
+                {
+                    return serde_json::from_str(&content).unwrap_or_default();
                 }
                 Self::default()
             }
@@ -57,10 +57,10 @@ impl UpdateState {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
             Err(_) => {
                 let legacy = legacy_state_path();
-                if legacy != path {
-                    if let Ok(content) = tokio::fs::read_to_string(&legacy).await {
-                        return serde_json::from_str(&content).unwrap_or_default();
-                    }
+                if legacy != path
+                    && let Ok(content) = tokio::fs::read_to_string(&legacy).await
+                {
+                    return serde_json::from_str(&content).unwrap_or_default();
                 }
                 Self::default()
             }
