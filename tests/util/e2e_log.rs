@@ -1315,9 +1315,18 @@ impl Drop for PhaseTracker {
         if self.completed {
             return;
         }
+        let duration_ms = self.start_time.elapsed().as_millis() as u64;
+        let panicking = std::thread::panicking();
+
+        // Dump failure state if panicking
+        if panicking {
+            let dump = FailureDump::new(&self.test_info.name, &self.test_info.suite);
+            if let Err(e) = dump.write(&self.artifacts.dir) {
+                eprintln!("[FailureDump] Failed to write dump: {}", e);
+            }
+        }
+
         if let Some(ref lg) = self.logger {
-            let duration_ms = self.start_time.elapsed().as_millis() as u64;
-            let panicking = std::thread::panicking();
             let error = if panicking {
                 Some(E2eError::new("panic"))
             } else {
@@ -1328,6 +1337,417 @@ impl Drop for PhaseTracker {
             let _ = lg.flush();
         }
     }
+}
+
+// =============================================================================
+// Failure State Dump
+// =============================================================================
+
+/// Captures comprehensive diagnostic state on test failure.
+///
+/// When a test panics, this struct captures:
+/// 1. Environment variables (sanitized)
+/// 2. Temp directory listing
+/// 3. Log tail (last 100 lines)
+/// 4. Database state (if SQLite exists)
+/// 5. Git state (branch, uncommitted changes)
+/// 6. Process info (memory, open files)
+#[allow(dead_code)]
+pub struct FailureDump {
+    test_name: String,
+    suite: String,
+    timestamp: String,
+}
+
+#[allow(dead_code)]
+impl FailureDump {
+    /// Create a new FailureDump for the given test.
+    pub fn new(test_name: &str, suite: &str) -> Self {
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        Self {
+            test_name: test_name.to_string(),
+            suite: suite.to_string(),
+            timestamp,
+        }
+    }
+
+    /// Write the failure dump to the specified directory.
+    ///
+    /// Creates `test-results/failure_dumps/{suite}_{test_name}_{timestamp}.txt`
+    pub fn write(&self, artifact_dir: &Path) -> std::io::Result<()> {
+        // Create failure_dumps directory
+        let dump_dir = Self::dump_dir()?;
+        fs::create_dir_all(&dump_dir)?;
+
+        let dump_path = dump_dir.join(format!(
+            "{}_{}_{}.txt",
+            self.suite, self.test_name, self.timestamp
+        ));
+
+        let mut f = File::create(&dump_path)?;
+
+        // Header
+        writeln!(
+            f,
+            "==============================================================================="
+        )?;
+        writeln!(f, "FAILURE STATE DUMP")?;
+        writeln!(
+            f,
+            "==============================================================================="
+        )?;
+        writeln!(f, "Test: {}::{}", self.suite, self.test_name)?;
+        writeln!(f, "Time: {}", chrono::Utc::now().to_rfc3339())?;
+        writeln!(f, "Artifact Dir: {}", artifact_dir.display())?;
+        writeln!(f)?;
+
+        // 1. Environment
+        self.dump_environment(&mut f)?;
+
+        // 2. Temp directory listing
+        self.dump_directory_listing(&mut f, artifact_dir)?;
+
+        // 3. Log tail
+        self.dump_log_tail(&mut f, artifact_dir)?;
+
+        // 4. Database state
+        self.dump_database_state(&mut f, artifact_dir)?;
+
+        // 5. Git state
+        self.dump_git_state(&mut f)?;
+
+        // 6. Process info
+        self.dump_process_info(&mut f)?;
+
+        writeln!(f)?;
+        writeln!(
+            f,
+            "==============================================================================="
+        )?;
+        writeln!(f, "END OF FAILURE DUMP")?;
+        writeln!(
+            f,
+            "==============================================================================="
+        )?;
+
+        eprintln!("[FailureDump] Written to: {}", dump_path.display());
+        Ok(())
+    }
+
+    fn dump_dir() -> std::io::Result<PathBuf> {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        Ok(manifest_dir.join("test-results").join("failure_dumps"))
+    }
+
+    fn dump_environment(&self, f: &mut File) -> std::io::Result<()> {
+        writeln!(f, "=== ENVIRONMENT ===")?;
+        writeln!(f, "Working Directory: {:?}", std::env::current_dir().ok())?;
+        writeln!(f, "User: {:?}", std::env::var("USER").ok())?;
+        writeln!(f, "Home: {:?}", std::env::var("HOME").ok())?;
+        writeln!(f)?;
+
+        // Sanitized env vars (reuse existing function)
+        let env = capture_sanitized_env();
+        let mut keys: Vec<_> = env.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(val) = env.get(key) {
+                writeln!(f, "{}={}", key, val)?;
+            }
+        }
+        writeln!(f)?;
+        Ok(())
+    }
+
+    fn dump_directory_listing(&self, f: &mut File, dir: &Path) -> std::io::Result<()> {
+        writeln!(f, "=== TEMP DIRECTORY LISTING ===")?;
+        writeln!(f, "Directory: {}", dir.display())?;
+        writeln!(f)?;
+
+        if dir.exists() {
+            self.list_dir_recursive(f, dir, 0, 3)?; // Max depth of 3
+        } else {
+            writeln!(f, "(directory does not exist)")?;
+        }
+        writeln!(f)?;
+        Ok(())
+    }
+
+    fn list_dir_recursive(
+        &self,
+        f: &mut File,
+        dir: &Path,
+        depth: usize,
+        max_depth: usize,
+    ) -> std::io::Result<()> {
+        if depth > max_depth {
+            writeln!(f, "{}... (max depth reached)", "  ".repeat(depth))?;
+            return Ok(());
+        }
+
+        let indent = "  ".repeat(depth);
+
+        match fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                entries.sort_by_key(|e| e.file_name());
+
+                for entry in entries.iter().take(50) {
+                    // Limit entries per directory
+                    let path = entry.path();
+                    let name = entry.file_name();
+                    let metadata = entry.metadata().ok();
+
+                    let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+
+                    if is_dir {
+                        writeln!(f, "{}{}/", indent, name.to_string_lossy())?;
+                        self.list_dir_recursive(f, &path, depth + 1, max_depth)?;
+                    } else {
+                        writeln!(f, "{}{} ({} bytes)", indent, name.to_string_lossy(), size)?;
+                    }
+                }
+
+                if entries.len() > 50 {
+                    writeln!(f, "{}... ({} more entries)", indent, entries.len() - 50)?;
+                }
+            }
+            Err(e) => {
+                writeln!(f, "{}(error reading directory: {})", indent, e)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn dump_log_tail(&self, f: &mut File, artifact_dir: &Path) -> std::io::Result<()> {
+        writeln!(f, "=== LOG TAIL (last 100 lines) ===")?;
+
+        // Check for common log files
+        let log_files = [
+            artifact_dir.join("cass.log"),
+            artifact_dir.join("stdout"),
+            artifact_dir.join("stderr"),
+            artifact_dir.join("verbose.log"),
+        ];
+
+        for log_path in &log_files {
+            if log_path.exists() {
+                writeln!(f, "--- {} ---", log_path.display())?;
+                match fs::read_to_string(log_path) {
+                    Ok(content) => {
+                        let lines: Vec<_> = content.lines().collect();
+                        let start = lines.len().saturating_sub(100);
+                        for line in &lines[start..] {
+                            writeln!(f, "{}", line)?;
+                        }
+                    }
+                    Err(e) => {
+                        writeln!(f, "(error reading file: {})", e)?;
+                    }
+                }
+                writeln!(f)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn dump_database_state(&self, f: &mut File, artifact_dir: &Path) -> std::io::Result<()> {
+        writeln!(f, "=== DATABASE STATE ===")?;
+
+        // Look for SQLite databases
+        let _db_patterns = ["*.db", "*.sqlite", "*.sqlite3"];
+        let mut found_any = false;
+
+        if let Ok(entries) = fs::read_dir(artifact_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if ext_str == "db" || ext_str == "sqlite" || ext_str == "sqlite3" {
+                        found_any = true;
+                        writeln!(f, "--- {} ---", path.display())?;
+                        self.dump_sqlite_info(f, &path)?;
+                    }
+                }
+            }
+        }
+
+        if !found_any {
+            writeln!(f, "(no SQLite databases found in artifact directory)")?;
+        }
+        writeln!(f)?;
+        Ok(())
+    }
+
+    fn dump_sqlite_info(&self, f: &mut File, db_path: &Path) -> std::io::Result<()> {
+        // Try to get schema and row counts using sqlite3 command
+        let schema_output = std::process::Command::new("sqlite3")
+            .arg(db_path)
+            .arg(".schema")
+            .output();
+
+        match schema_output {
+            Ok(output) if output.status.success() => {
+                let schema = String::from_utf8_lossy(&output.stdout);
+                let lines: Vec<_> = schema.lines().take(50).collect();
+                writeln!(f, "Schema (first 50 lines):")?;
+                for line in lines {
+                    writeln!(f, "  {}", line)?;
+                }
+                if schema.lines().count() > 50 {
+                    writeln!(f, "  ... (truncated)")?;
+                }
+            }
+            _ => {
+                writeln!(f, "(sqlite3 command not available or failed)")?;
+            }
+        }
+
+        // Get table counts
+        let tables_output = std::process::Command::new("sqlite3")
+            .arg(db_path)
+            .arg("SELECT name FROM sqlite_master WHERE type='table';")
+            .output();
+
+        if let Ok(output) = tables_output {
+            if output.status.success() {
+                let tables = String::from_utf8_lossy(&output.stdout);
+                writeln!(f, "Tables:")?;
+                for table in tables.lines().take(20) {
+                    // Get row count for each table
+                    let count_output = std::process::Command::new("sqlite3")
+                        .arg(db_path)
+                        .arg(format!("SELECT COUNT(*) FROM \"{}\";", table))
+                        .output();
+                    let count = count_output
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    writeln!(f, "  {} ({} rows)", table, count)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn dump_git_state(&self, f: &mut File) -> std::io::Result<()> {
+        writeln!(f, "=== GIT STATE ===")?;
+
+        // Current branch
+        let branch_output = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output();
+        if let Ok(output) = branch_output {
+            if output.status.success() {
+                writeln!(
+                    f,
+                    "Branch: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                )?;
+            }
+        }
+
+        // Current commit
+        let commit_output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output();
+        if let Ok(output) = commit_output {
+            if output.status.success() {
+                writeln!(
+                    f,
+                    "Commit: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                )?;
+            }
+        }
+
+        // Uncommitted changes (short status)
+        let status_output = std::process::Command::new("git")
+            .args(["status", "--short"])
+            .output();
+        if let Ok(output) = status_output {
+            if output.status.success() {
+                let status = String::from_utf8_lossy(&output.stdout);
+                if status.trim().is_empty() {
+                    writeln!(f, "Status: (clean)")?;
+                } else {
+                    writeln!(f, "Uncommitted changes:")?;
+                    for line in status.lines().take(20) {
+                        writeln!(f, "  {}", line)?;
+                    }
+                    if status.lines().count() > 20 {
+                        writeln!(f, "  ... (truncated)")?;
+                    }
+                }
+            }
+        }
+        writeln!(f)?;
+        Ok(())
+    }
+
+    fn dump_process_info(&self, f: &mut File) -> std::io::Result<()> {
+        writeln!(f, "=== PROCESS INFO ===")?;
+        writeln!(f, "PID: {}", std::process::id())?;
+
+        // Memory usage on Linux
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(statm) = fs::read_to_string("/proc/self/statm") {
+                let parts: Vec<_> = statm.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let page_size = 4096u64; // Typical page size
+                    if let Ok(resident) = parts[1].parse::<u64>() {
+                        let rss_mb = (resident * page_size) as f64 / (1024.0 * 1024.0);
+                        writeln!(f, "Memory (RSS): {:.2} MB", rss_mb)?;
+                    }
+                }
+            }
+
+            // Open file handles
+            if let Ok(entries) = fs::read_dir("/proc/self/fd") {
+                let count = entries.count();
+                writeln!(f, "Open file handles: {}", count)?;
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            writeln!(f, "(detailed process info not available on this platform)")?;
+        }
+
+        writeln!(f)?;
+        Ok(())
+    }
+}
+
+/// Standalone function to dump failure state from any test context.
+///
+/// Can be called from shell scripts via a wrapper binary or from Rust tests directly.
+///
+/// # Example
+/// ```ignore
+/// use crate::util::e2e_log::dump_failure_state;
+///
+/// // In a test's panic handler or cleanup:
+/// if let Err(e) = dump_failure_state("test_name", "suite_name", "/path/to/temp/dir") {
+///     eprintln!("Failed to dump state: {}", e);
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn dump_failure_state(
+    test_name: &str,
+    suite: &str,
+    artifact_dir: impl AsRef<Path>,
+) -> std::io::Result<PathBuf> {
+    let dump = FailureDump::new(test_name, suite);
+    dump.write(artifact_dir.as_ref())?;
+
+    let dump_dir = FailureDump::dump_dir()?;
+    Ok(dump_dir.join(format!("{}_{}_{}.txt", suite, test_name, dump.timestamp)))
 }
 
 /// Run a test and emit structured logging events when E2E_LOG is enabled.
@@ -1982,5 +2402,113 @@ mod tests {
         tracker.metrics("test_operation", &metrics);
 
         tracker.complete();
+    }
+
+    // ==================== FailureDump tests ====================
+
+    #[test]
+    fn test_failure_dump_new() {
+        let dump = FailureDump::new("my_test", "my_suite");
+        assert_eq!(dump.test_name, "my_test");
+        assert_eq!(dump.suite, "my_suite");
+        assert!(!dump.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_failure_dump_write() {
+        let tmp = TempDir::new().unwrap();
+        let artifact_dir = tmp.path().to_path_buf();
+
+        // Create some test files in artifact dir
+        fs::write(artifact_dir.join("stdout"), "test stdout output\n").unwrap();
+        fs::write(artifact_dir.join("stderr"), "test stderr output\n").unwrap();
+
+        let dump = FailureDump::new("test_write", "unit");
+        let result = dump.write(&artifact_dir);
+
+        assert!(result.is_ok(), "FailureDump::write should succeed");
+
+        // Check that the dump file was created
+        let dump_dir = FailureDump::dump_dir().unwrap();
+        let entries: Vec<_> = fs::read_dir(&dump_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("unit_test_write_"))
+            .collect();
+
+        assert!(
+            !entries.is_empty(),
+            "Should have created a dump file matching pattern"
+        );
+
+        // Read the dump and verify content
+        let dump_content = fs::read_to_string(entries[0].path()).unwrap();
+        assert!(dump_content.contains("FAILURE STATE DUMP"));
+        assert!(dump_content.contains("Test: unit::test_write"));
+        assert!(dump_content.contains("=== ENVIRONMENT ==="));
+        assert!(dump_content.contains("=== TEMP DIRECTORY LISTING ==="));
+        assert!(dump_content.contains("=== LOG TAIL"));
+        assert!(dump_content.contains("=== GIT STATE ==="));
+        assert!(dump_content.contains("=== PROCESS INFO ==="));
+
+        // Clean up
+        let _ = fs::remove_file(entries[0].path());
+    }
+
+    #[test]
+    fn test_failure_dump_standalone_function() {
+        let tmp = TempDir::new().unwrap();
+        let artifact_dir = tmp.path();
+
+        let result = dump_failure_state("standalone_test", "integration", artifact_dir);
+        assert!(result.is_ok(), "dump_failure_state should succeed");
+
+        let dump_path = result.unwrap();
+        assert!(
+            dump_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("integration_standalone_test_"),
+            "Dump file should have expected naming pattern"
+        );
+
+        // Clean up
+        let _ = fs::remove_file(&dump_path);
+    }
+
+    #[test]
+    fn test_failure_dump_captures_log_tail() {
+        let tmp = TempDir::new().unwrap();
+        let artifact_dir = tmp.path();
+
+        // Create a log file with >100 lines
+        let log_content: String = (0..150).map(|i| format!("Log line {}\n", i)).collect();
+        fs::write(artifact_dir.join("cass.log"), &log_content).unwrap();
+
+        let dump = FailureDump::new("log_tail_test", "unit");
+        dump.write(artifact_dir).unwrap();
+
+        let dump_dir = FailureDump::dump_dir().unwrap();
+        let entries: Vec<_> = fs::read_dir(&dump_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("unit_log_tail_test_")
+            })
+            .collect();
+
+        let dump_content = fs::read_to_string(entries[0].path()).unwrap();
+
+        // Should contain the last lines (50-149) but not the first lines (0-49)
+        assert!(dump_content.contains("Log line 149"));
+        assert!(dump_content.contains("Log line 100"));
+        // First 50 lines should be truncated
+        assert!(!dump_content.contains("Log line 0\n"));
+
+        // Clean up
+        let _ = fs::remove_file(entries[0].path());
     }
 }
