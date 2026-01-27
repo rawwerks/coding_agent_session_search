@@ -598,18 +598,21 @@ fn ssh_sources_sync_sftp_fallback() {
     let _guard_home = EnvGuard::set("HOME", home_dir.to_string_lossy());
 
     // Override PATH to hide rsync, forcing SFTP fallback
-    let fake_bin = tmp.path().join("fake_bin");
-    fs::create_dir_all(&fake_bin).unwrap();
+    let fixture_bin = tmp.path().join("fixture_bin");
+    fs::create_dir_all(&fixture_bin).unwrap();
     let original_path = std::env::var("PATH").unwrap_or_default();
-    let _guard_path = EnvGuard::set("PATH", format!("{}:{}", fake_bin.display(), original_path));
+    let _guard_path = EnvGuard::set(
+        "PATH",
+        format!("{}:{}", fixture_bin.display(), original_path),
+    );
 
-    // Create a fake rsync that always fails
-    let fake_rsync = fake_bin.join("rsync");
-    fs::write(&fake_rsync, "#!/bin/bash\nexit 1\n").unwrap();
+    // Create a fixture rsync that always fails (forces SFTP fallback)
+    let fixture_rsync = fixture_bin.join("rsync");
+    fs::write(&fixture_rsync, "#!/bin/bash\nexit 1\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&fake_rsync, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&fixture_rsync, fs::Permissions::from_mode(0o755)).unwrap();
     }
     tracker.end("setup", Some("Create temp directories and config"), start);
 
@@ -623,7 +626,10 @@ fn ssh_sources_sync_sftp_fallback() {
         .env("XDG_CONFIG_HOME", &config_dir)
         .env("XDG_DATA_HOME", &data_dir)
         .env("HOME", &home_dir)
-        .env("PATH", format!("{}:{}", fake_bin.display(), original_path))
+        .env(
+            "PATH",
+            format!("{}:{}", fixture_bin.display(), original_path),
+        )
         .timeout(Duration::from_secs(120))
         .output()
         .expect("sources sync command");

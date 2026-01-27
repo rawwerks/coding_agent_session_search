@@ -1,3 +1,13 @@
+# Coverage Policy: See docs/COVERAGE_POLICY.md for full details
+#
+# Phased Threshold Schedule (br-2r76):
+#   Phase 1 (Current): 60% - Foundation
+#   Phase 2 (Q2 2026): 70% - Stability
+#   Phase 3 (Q3 2026): 80% - Confidence
+#   Phase 4 (Q4 2026): 90% - Excellence
+#
+# Update COVERAGE_THRESHOLD when advancing phases.
+
 name: Coverage
 
 on:
@@ -10,6 +20,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Phased coverage threshold - update per docs/COVERAGE_POLICY.md schedule
+  COVERAGE_THRESHOLD: 60
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -75,26 +87,37 @@ jobs:
           COVERAGE=$(jq -r '.data[0].totals.lines.percent // 0' coverage.json)
           echo "## Test Coverage: ${COVERAGE}%" >> $GITHUB_STEP_SUMMARY
 
-          # Add badge-style indicator
-          if (( $(echo "$COVERAGE >= 80" | bc -l) )); then
-            echo "Status: :white_check_mark: Meets 80% threshold" >> $GITHUB_STEP_SUMMARY
+          # Phased threshold indicators (see docs/COVERAGE_POLICY.md)
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Phase Progress" >> $GITHUB_STEP_SUMMARY
+          if (( $(echo "$COVERAGE >= 90" | bc -l) )); then
+            echo ":trophy: **Phase 4 Complete** - Excellence (90%+)" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$COVERAGE >= 80" | bc -l) )); then
+            echo ":star: **Phase 3 Complete** - Confidence (80%+)" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$COVERAGE >= 70" | bc -l) )); then
+            echo ":white_check_mark: **Phase 2 Complete** - Stability (70%+)" >> $GITHUB_STEP_SUMMARY
           elif (( $(echo "$COVERAGE >= 60" | bc -l) )); then
-            echo "Status: :warning: Below 80% threshold" >> $GITHUB_STEP_SUMMARY
+            echo ":heavy_check_mark: **Phase 1 Complete** - Foundation (60%+)" >> $GITHUB_STEP_SUMMARY
           else
-            echo "Status: :x: Needs improvement" >> $GITHUB_STEP_SUMMARY
+            echo ":x: **Below Phase 1** - Needs improvement (<60%)" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_See [Coverage Policy](../docs/COVERAGE_POLICY.md) for targets_" >> $GITHUB_STEP_SUMMARY
 
       - name: Check coverage threshold
         if: github.event_name == 'pull_request'
         run: |
           COVERAGE=$(jq -r '.data[0].totals.lines.percent // 0' coverage.json)
-          THRESHOLD=60
+          # Use environment variable for phased threshold (see docs/COVERAGE_POLICY.md)
+          THRESHOLD=${{ env.COVERAGE_THRESHOLD }}
 
           echo "Coverage: ${COVERAGE}%"
-          echo "Threshold: ${THRESHOLD}%"
+          echo "Threshold: ${THRESHOLD}% (Phase 1 - Foundation)"
+          echo "Policy: See docs/COVERAGE_POLICY.md for phased targets"
 
           if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
             echo "::error::Coverage ${COVERAGE}% is below ${THRESHOLD}% threshold"
+            echo "::error::Add tests for new code or see docs/COVERAGE_POLICY.md for exclusion process"
             exit 1
           fi
 

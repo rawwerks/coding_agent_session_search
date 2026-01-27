@@ -426,6 +426,10 @@ The unified test runner executes all E2E suites and produces consolidated report
 - `test-results/e2e/combined.jsonl` - Aggregated JSONL (excludes trace.jsonl)
 - `test-results/e2e/summary.md` - Human-readable Markdown summary
 
+**Retention:**
+- CI keeps E2E artifacts (logs/traces/summary) for 7 days by default.
+- Local `test-results/e2e/` can be cleaned manually when no longer needed.
+
 ### Parsing JSONL Logs
 
 ```bash

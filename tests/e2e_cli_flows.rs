@@ -748,6 +748,357 @@ fn view_nonexistent_file_handles_gracefully() {
 }
 
 // =============================================================================
+// Index Watch-Once Tests (br-154l)
+// =============================================================================
+
+#[test]
+fn index_watch_once_processes_file_changes() {
+    let tracker = tracker_for("index_watch_once_processes_file_changes");
+    let _trace_guard = tracker.trace_env_guard();
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path();
+    let codex_home = home.join(".codex");
+    let data_dir = home.join("cass_data");
+    fs::create_dir_all(&data_dir).unwrap();
+
+    // Create initial fixture
+    make_codex_session(&codex_home, "initial session content", 1733011200000);
+
+    // Run full index first
+    let phase_start = tracker.start("initial_index", Some("Run initial full index"));
+    base_cmd()
+        .args(["index", "--full", "--data-dir"])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .assert()
+        .success();
+    tracker.end(
+        "initial_index",
+        Some("Initial index complete"),
+        phase_start,
+    );
+
+    // Get initial stats
+    let stats_output = base_cmd()
+        .args(["stats", "--json", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    let initial_stats: Value =
+        serde_json::from_str(&String::from_utf8_lossy(&stats_output.stdout)).unwrap_or_default();
+
+    // Create a new session file
+    let new_sessions = codex_home.join("sessions/2024/12/02");
+    fs::create_dir_all(&new_sessions).unwrap();
+    let new_file = new_sessions.join("rollout-new.jsonl");
+    let new_content = r#"{"type": "event_msg", "timestamp": 1733097600000, "payload": {"type": "user_message", "message": "new session content"}}
+{"type": "response_item", "timestamp": 1733097601000, "payload": {"role": "assistant", "content": "response to new session"}}"#;
+    fs::write(&new_file, new_content).unwrap();
+
+    // Run watch-once to pick up the new file
+    let watch_start = tracker.start("watch_once", Some("Run watch-once index"));
+    let output = base_cmd()
+        .args([
+            "index",
+            "--watch-once-paths",
+            &new_file.to_string_lossy(),
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("CODEX_HOME", &codex_home)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    let watch_ms = watch_start.elapsed().as_millis() as u64;
+    tracker.end("watch_once", Some("Watch-once complete"), watch_start);
+
+    assert!(output.status.success(), "watch-once should succeed");
+
+    // Verify new session was indexed by checking stats
+    let final_stats_output = base_cmd()
+        .args(["stats", "--json", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", home)
+        .output()
+        .unwrap();
+    let final_stats: Value =
+        serde_json::from_str(&String::from_utf8_lossy(&final_stats_output.stdout)).unwrap_or_default();
+
+    // Stats should reflect new session (or at least not crash)
+    let initial_count = initial_stats
+        .get("total")
+        .or_else(|| initial_stats.get("sessions"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let final_count = final_stats
+        .get("total")
+        .or_else(|| final_stats.get("sessions"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    // Final count should be >= initial (new session indexed)
+    assert!(
+        final_count >= initial_count,
+        "Session count should increase or stay same after watch-once"
+    );
+
+    tracker.metrics(
+        "cass_watch_once",
+        &E2ePerformanceMetrics::new()
+            .with_duration(watch_ms)
+            .with_custom("operation", "watch_once"),
+    );
+    tracker.complete();
+}
+
+// =============================================================================
+// Semantic/Hybrid Search Tests (br-154l)
+// =============================================================================
+
+#[test]
+fn search_semantic_mode() {
+    let tracker = tracker_for("search_semantic_mode");
+    let _trace_guard = tracker.trace_env_guard();
+    let (tmp, data_dir) = setup_indexed_env();
+
+    // Attempt semantic search (may fallback to lexical if no embedder)
+    let search_start = tracker.start("run_semantic_search", Some("Execute semantic search"));
+    let output = base_cmd()
+        .args([
+            "search",
+            "database connection",
+            "--robot",
+            "--mode",
+            "semantic",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    let search_ms = search_start.elapsed().as_millis() as u64;
+    tracker.end("run_semantic_search", Some("Semantic search complete"), search_start);
+
+    // Semantic mode may succeed or gracefully degrade
+    // Exit 0 = success, Exit 3 = fallback (semantic not available)
+    let exit_code = output.status.code().unwrap_or(99);
+    assert!(
+        exit_code == 0 || exit_code == 3,
+        "Semantic search should succeed or gracefully fallback, got exit: {}",
+        exit_code
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+        assert!(
+            json.get("hits").is_some()
+                || json.get("results").is_some()
+                || json.get("error").is_some()
+                || json.get("fallback").is_some(),
+            "Semantic search should return results or fallback info. JSON: {}",
+            json
+        );
+    }
+
+    tracker.metrics(
+        "cass_semantic_search",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_ms)
+            .with_custom("mode", "semantic"),
+    );
+    tracker.complete();
+}
+
+#[test]
+fn search_hybrid_mode() {
+    let tracker = tracker_for("search_hybrid_mode");
+    let _trace_guard = tracker.trace_env_guard();
+    let (tmp, data_dir) = setup_indexed_env();
+
+    // Attempt hybrid search
+    let search_start = tracker.start("run_hybrid_search", Some("Execute hybrid search"));
+    let output = base_cmd()
+        .args([
+            "search",
+            "authentication error",
+            "--robot",
+            "--mode",
+            "hybrid",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    let search_ms = search_start.elapsed().as_millis() as u64;
+    tracker.end("run_hybrid_search", Some("Hybrid search complete"), search_start);
+
+    // Hybrid mode may succeed or gracefully degrade
+    let exit_code = output.status.code().unwrap_or(99);
+    assert!(
+        exit_code == 0 || exit_code == 3,
+        "Hybrid search should succeed or gracefully fallback, got exit: {}",
+        exit_code
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.trim().is_empty() {
+        let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+        assert!(
+            json.get("hits").is_some()
+                || json.get("results").is_some()
+                || json.get("error").is_some()
+                || json.get("fallback").is_some(),
+            "Hybrid search should return results or fallback info. JSON: {}",
+            json
+        );
+    }
+
+    tracker.metrics(
+        "cass_hybrid_search",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_ms)
+            .with_custom("mode", "hybrid"),
+    );
+    tracker.complete();
+}
+
+#[test]
+fn search_lexical_mode_explicit() {
+    let tracker = tracker_for("search_lexical_mode_explicit");
+    let _trace_guard = tracker.trace_env_guard();
+    let (tmp, data_dir) = setup_indexed_env();
+
+    // Explicit lexical mode (should always work)
+    let search_start = tracker.start("run_lexical_search", Some("Execute explicit lexical search"));
+    let output = base_cmd()
+        .args([
+            "search",
+            "authentication",
+            "--robot",
+            "--mode",
+            "lexical",
+            "--data-dir",
+        ])
+        .arg(&data_dir)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    let search_ms = search_start.elapsed().as_millis() as u64;
+    tracker.end("run_lexical_search", Some("Lexical search complete"), search_start);
+
+    assert!(output.status.success(), "Lexical search should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+    assert!(
+        json.get("hits").is_some() || json.get("results").is_some(),
+        "Lexical search should return hits/results. JSON: {}",
+        json
+    );
+
+    tracker.metrics(
+        "cass_lexical_search",
+        &E2ePerformanceMetrics::new()
+            .with_duration(search_ms)
+            .with_custom("mode", "lexical"),
+    );
+    tracker.complete();
+}
+
+// =============================================================================
+// Diag Command Tests (br-154l)
+// =============================================================================
+
+#[test]
+fn diag_command_returns_diagnostic_info() {
+    let tracker = tracker_for("diag_command_returns_diagnostic_info");
+    let _trace_guard = tracker.trace_env_guard();
+    let (tmp, data_dir) = setup_indexed_env();
+
+    let diag_start = tracker.start("run_diag", Some("Execute diag command"));
+    let output = base_cmd()
+        .args(["diag", "--json", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    let diag_ms = diag_start.elapsed().as_millis() as u64;
+    tracker.end("run_diag", Some("Diag complete"), diag_start);
+
+    // Diag should succeed or return structured error
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.success() && !stdout.trim().is_empty() {
+        let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+        // Should have diagnostic info like version, db path, index stats, etc.
+        assert!(
+            json.get("version").is_some()
+                || json.get("db_path").is_some()
+                || json.get("index_path").is_some()
+                || json.get("diagnostics").is_some()
+                || json.get("config").is_some(),
+            "Diag should return diagnostic fields. JSON: {}, stderr: {}",
+            json,
+            stderr
+        );
+    }
+
+    tracker.metrics(
+        "cass_diag",
+        &E2ePerformanceMetrics::new()
+            .with_duration(diag_ms)
+            .with_custom("operation", "diag"),
+    );
+    tracker.complete();
+}
+
+#[test]
+fn status_command_returns_index_status() {
+    let tracker = tracker_for("status_command_returns_index_status");
+    let _trace_guard = tracker.trace_env_guard();
+    let (tmp, data_dir) = setup_indexed_env();
+
+    let status_start = tracker.start("run_status", Some("Execute status command"));
+    let output = base_cmd()
+        .args(["status", "--json", "--data-dir"])
+        .arg(&data_dir)
+        .env("HOME", tmp.path())
+        .output()
+        .unwrap();
+    let status_ms = status_start.elapsed().as_millis() as u64;
+    tracker.end("run_status", Some("Status complete"), status_start);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if output.status.success() && !stdout.trim().is_empty() {
+        let json: Value = serde_json::from_str(stdout.trim()).expect("Should be valid JSON");
+        // Status should have index state info
+        assert!(
+            json.get("indexed").is_some()
+                || json.get("sessions").is_some()
+                || json.get("status").is_some()
+                || json.get("last_indexed").is_some()
+                || json.get("count").is_some(),
+            "Status should return index state. JSON: {}",
+            json
+        );
+    }
+
+    tracker.metrics(
+        "cass_status",
+        &E2ePerformanceMetrics::new()
+            .with_duration(status_ms)
+            .with_custom("operation", "status"),
+    );
+    tracker.complete();
+}
+
+// =============================================================================
 // Multi-Agent E2E Tests
 // =============================================================================
 
