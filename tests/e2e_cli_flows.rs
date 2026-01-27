@@ -752,8 +752,8 @@ fn view_nonexistent_file_handles_gracefully() {
 // =============================================================================
 
 #[test]
-fn index_watch_once_processes_file_changes() {
-    let tracker = tracker_for("index_watch_once_processes_file_changes");
+fn index_incremental_processes_file_changes() {
+    let tracker = tracker_for("index_incremental_processes_file_changes");
     let _trace_guard = tracker.trace_env_guard();
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
@@ -773,11 +773,7 @@ fn index_watch_once_processes_file_changes() {
         .env("HOME", home)
         .assert()
         .success();
-    tracker.end(
-        "initial_index",
-        Some("Initial index complete"),
-        phase_start,
-    );
+    tracker.end("initial_index", Some("Initial index complete"), phase_start);
 
     // Get initial stats
     let stats_output = base_cmd()
@@ -797,24 +793,27 @@ fn index_watch_once_processes_file_changes() {
 {"type": "response_item", "timestamp": 1733097601000, "payload": {"role": "assistant", "content": "response to new session"}}"#;
     fs::write(&new_file, new_content).unwrap();
 
-    // Run watch-once to pick up the new file
-    let watch_start = tracker.start("watch_once", Some("Run watch-once index"));
+    // Run incremental index to pick up the new file
+    let incr_start = tracker.start("incremental_index", Some("Run incremental index"));
     let output = base_cmd()
-        .args([
-            "index",
-            "--watch-once-paths",
-            &new_file.to_string_lossy(),
-            "--data-dir",
-        ])
+        .args(["index", "--data-dir"])
         .arg(&data_dir)
         .env("CODEX_HOME", &codex_home)
         .env("HOME", home)
         .output()
         .unwrap();
-    let watch_ms = watch_start.elapsed().as_millis() as u64;
-    tracker.end("watch_once", Some("Watch-once complete"), watch_start);
+    let incr_ms = incr_start.elapsed().as_millis() as u64;
+    tracker.end(
+        "incremental_index",
+        Some("Incremental index complete"),
+        incr_start,
+    );
 
-    assert!(output.status.success(), "watch-once should succeed");
+    assert!(
+        output.status.success(),
+        "Incremental index should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Verify new session was indexed by checking stats
     let final_stats_output = base_cmd()
@@ -824,7 +823,8 @@ fn index_watch_once_processes_file_changes() {
         .output()
         .unwrap();
     let final_stats: Value =
-        serde_json::from_str(&String::from_utf8_lossy(&final_stats_output.stdout)).unwrap_or_default();
+        serde_json::from_str(&String::from_utf8_lossy(&final_stats_output.stdout))
+            .unwrap_or_default();
 
     // Stats should reflect new session (or at least not crash)
     let initial_count = initial_stats
@@ -841,14 +841,14 @@ fn index_watch_once_processes_file_changes() {
     // Final count should be >= initial (new session indexed)
     assert!(
         final_count >= initial_count,
-        "Session count should increase or stay same after watch-once"
+        "Session count should increase or stay same after incremental index"
     );
 
     tracker.metrics(
-        "cass_watch_once",
+        "cass_incremental_index",
         &E2ePerformanceMetrics::new()
-            .with_duration(watch_ms)
-            .with_custom("operation", "watch_once"),
+            .with_duration(incr_ms)
+            .with_custom("operation", "incremental_index"),
     );
     tracker.complete();
 }
@@ -879,7 +879,11 @@ fn search_semantic_mode() {
         .output()
         .unwrap();
     let search_ms = search_start.elapsed().as_millis() as u64;
-    tracker.end("run_semantic_search", Some("Semantic search complete"), search_start);
+    tracker.end(
+        "run_semantic_search",
+        Some("Semantic search complete"),
+        search_start,
+    );
 
     // Semantic mode may succeed or gracefully degrade
     // Exit 0 = success, Exit 3 = fallback (semantic not available)
@@ -934,7 +938,11 @@ fn search_hybrid_mode() {
         .output()
         .unwrap();
     let search_ms = search_start.elapsed().as_millis() as u64;
-    tracker.end("run_hybrid_search", Some("Hybrid search complete"), search_start);
+    tracker.end(
+        "run_hybrid_search",
+        Some("Hybrid search complete"),
+        search_start,
+    );
 
     // Hybrid mode may succeed or gracefully degrade
     let exit_code = output.status.code().unwrap_or(99);
@@ -973,7 +981,10 @@ fn search_lexical_mode_explicit() {
     let (tmp, data_dir) = setup_indexed_env();
 
     // Explicit lexical mode (should always work)
-    let search_start = tracker.start("run_lexical_search", Some("Execute explicit lexical search"));
+    let search_start = tracker.start(
+        "run_lexical_search",
+        Some("Execute explicit lexical search"),
+    );
     let output = base_cmd()
         .args([
             "search",
@@ -988,7 +999,11 @@ fn search_lexical_mode_explicit() {
         .output()
         .unwrap();
     let search_ms = search_start.elapsed().as_millis() as u64;
-    tracker.end("run_lexical_search", Some("Lexical search complete"), search_start);
+    tracker.end(
+        "run_lexical_search",
+        Some("Lexical search complete"),
+        search_start,
+    );
 
     assert!(output.status.success(), "Lexical search should succeed");
 
