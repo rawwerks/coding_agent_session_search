@@ -23,6 +23,13 @@ const HTTP_TIMEOUT_SECS: u64 = 5;
 /// GitHub repo for release checks
 const GITHUB_REPO: &str = "Dicklesworthstone/coding_agent_session_search";
 
+fn updates_disabled() -> bool {
+    dotenvy::var("CASS_SKIP_UPDATE").is_ok()
+        || dotenvy::var("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT").is_ok()
+        || dotenvy::var("TUI_HEADLESS").is_ok()
+        || dotenvy::var("CI").is_ok()
+}
+
 /// Persistent state for update checker
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateState {
@@ -161,7 +168,7 @@ struct GitHubRelease {
 /// - Already on latest
 pub async fn check_for_updates(current_version: &str) -> Option<UpdateInfo> {
     // Escape hatch for CI/CD or restricted environments
-    if std::env::var("CASS_SKIP_UPDATE").is_ok() {
+    if updates_disabled() {
         return None;
     }
 
@@ -369,6 +376,10 @@ fn now_unix() -> i64 {
 /// Synchronous version of `check_for_updates` for use in sync TUI code.
 /// Uses reqwest blocking client with short timeout.
 pub fn check_for_updates_sync(current_version: &str) -> Option<UpdateInfo> {
+    if updates_disabled() {
+        return None;
+    }
+
     let mut state = UpdateState::load();
 
     // Respect check interval
@@ -454,6 +465,10 @@ pub fn spawn_update_check(
     current_version: String,
 ) -> std::sync::mpsc::Receiver<Option<UpdateInfo>> {
     let (tx, rx) = std::sync::mpsc::channel();
+    if updates_disabled() {
+        let _ = tx.send(None);
+        return rx;
+    }
     std::thread::spawn(move || {
         let result = check_for_updates_sync(&current_version);
         let _ = tx.send(result);
