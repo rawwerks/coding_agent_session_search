@@ -163,15 +163,22 @@ async fn handle_request(site_dir: &std::path::Path, request: &str) -> Vec<u8> {
     }
 
     let method = parts[0];
-    let path = parts[1];
+    let raw_path = parts[1];
 
     // Only support GET and HEAD
     if method != "GET" && method != "HEAD" {
         return build_response(400, "text/plain", b"Method Not Allowed".to_vec());
     }
 
-    // Decode URL and sanitize path
-    let decoded_path = urlencoding::decode(path).unwrap_or_else(|_| path.into());
+    // Strip query/fragment, then decode URL and sanitize path
+    let path_only = raw_path
+        .split('?')
+        .next()
+        .unwrap_or(raw_path)
+        .split('#')
+        .next()
+        .unwrap_or(raw_path);
+    let decoded_path = urlencoding::decode(path_only).unwrap_or_else(|_| path_only.into());
     let request_path = decoded_path.trim_start_matches('/');
 
     // Prevent directory traversal
