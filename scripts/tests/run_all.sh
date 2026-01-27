@@ -11,8 +11,9 @@
 #   ./scripts/tests/run_all.sh --help       # Show usage
 #
 # Outputs:
-#   test-results/e2e/*.jsonl    - Per-suite JSONL logs
-#   test-results/e2e/combined.jsonl - Aggregated JSONL
+#   test-results/e2e/<suite>/<test>/cass.log - Per-test JSONL logs (Rust E2E)
+#   test-results/e2e/*.jsonl    - Per-suite JSONL logs (shell/playwright/orchestrator)
+#   test-results/e2e/combined.jsonl - Aggregated JSONL (excludes trace.jsonl)
 #   test-results/e2e/summary.md - Human-readable summary
 #
 # Exit code: 0 if all suites pass, 1 if any suite fails
@@ -69,8 +70,9 @@ Options:
     --help            Show this help message
 
 Outputs:
+    test-results/e2e/<suite>/<test>/cass.log  Per-test JSONL logs (Rust E2E)
     test-results/e2e/*.jsonl     Per-suite JSONL logs following SCHEMA.md
-    test-results/e2e/combined.jsonl  Aggregated JSONL from all suites
+    test-results/e2e/combined.jsonl  Aggregated JSONL from all suites (excludes trace.jsonl)
     test-results/e2e/summary.md  Human-readable Markdown summary
 
 Exit Codes:
@@ -204,9 +206,13 @@ generate_summary() {
     local summary_file="${OUTPUT_DIR}/summary.md"
     local combined_file="${OUTPUT_DIR}/combined.jsonl"
 
-    # Aggregate JSONL files
+    # Aggregate JSONL files (exclude trace.jsonl and combined.jsonl)
     echo "Aggregating JSONL logs..."
-    cat "${OUTPUT_DIR}"/*.jsonl > "$combined_file" 2>/dev/null || true
+    : > "$combined_file"
+    find "$OUTPUT_DIR" -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+        ! -name "trace.jsonl" ! -name "combined.jsonl" -print0 \
+        | sort -z \
+        | xargs -0 cat >> "$combined_file" 2>/dev/null || true
 
     # Generate Markdown summary
     cat > "$summary_file" << EOF
@@ -255,9 +261,10 @@ EOF
 - Combined JSONL: \`test-results/e2e/combined.jsonl\`
 EOF
 
-    for f in "${OUTPUT_DIR}"/*.jsonl; do
-        [[ -f "$f" ]] && echo "- $(basename "$f")" >> "$summary_file"
-    done
+    while IFS= read -r -d '' f; do
+        echo "- ${f#${PROJECT_ROOT}/}" >> "$summary_file"
+    done < <(find "$OUTPUT_DIR" -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+        ! -name "trace.jsonl" ! -name "combined.jsonl" -print0 | sort -z)
 
     echo ""
     echo -e "${BOLD}Summary written to:${NC} $summary_file"

@@ -756,6 +756,35 @@ fn contains_unicode_path_attack(input: &str) -> bool {
             | '\u{2024}' // ONE DOT LEADER → .
             // Halfwidth forms
             | '\u{FF61}' // HALFWIDTH IDEOGRAPHIC FULL STOP
+            // Combining characters that could modify path-sensitive chars
+            | '\u{0338}' // COMBINING LONG SOLIDUS OVERLAY (could visually disguise)
+            | '\u{0337}' // COMBINING SHORT SOLIDUS OVERLAY
+            // Zero-width characters (invisible, could split tokens)
+            | '\u{200D}' // ZERO WIDTH JOINER
+            | '\u{200C}' // ZERO WIDTH NON-JOINER
+            | '\u{200B}' // ZERO WIDTH SPACE
+            | '\u{FEFF}' // BYTE ORDER MARK / ZERO WIDTH NO-BREAK SPACE
+            // Right-to-left override (can visually reverse path display)
+            | '\u{202E}' // RIGHT-TO-LEFT OVERRIDE
+            | '\u{202D}' // LEFT-TO-RIGHT OVERRIDE
+            | '\u{202C}' // POP DIRECTIONAL FORMATTING
+            | '\u{202A}' // LEFT-TO-RIGHT EMBEDDING
+            | '\u{202B}' // RIGHT-TO-LEFT EMBEDDING
+            | '\u{2066}' // LEFT-TO-RIGHT ISOLATE
+            | '\u{2067}' // RIGHT-TO-LEFT ISOLATE
+            | '\u{2068}' // FIRST STRONG ISOLATE
+            | '\u{2069}' // POP DIRECTIONAL ISOLATE
+            // Confusable slash characters
+            | '\u{2044}' // FRACTION SLASH (visually similar to /)
+            | '\u{2215}' // DIVISION SLASH (visually similar to /)
+            | '\u{29F8}' // BIG SOLIDUS
+            | '\u{1735}' // PHILIPPINE SINGLE PUNCTUATION (looks like /)
+            // Confusable dot characters
+            | '\u{2E2E}' // REVERSED QUESTION MARK (can look like period in some fonts)
+            | '\u{0701}' // SYRIAC SUPRALINEAR FULL STOP
+            | '\u{0702}' // SYRIAC SUBLINEAR FULL STOP
+            | '\u{A60E}' // VAI FULL STOP
+            | '\u{10A50}' // KHAROSHTHI PUNCTUATION DOT
             => return true,
             _ => {}
         }
@@ -1789,5 +1818,196 @@ mod tests {
             result,
             Some("url-encoded unicode normalization attack".to_string())
         );
+    }
+
+    // --- Additional Unicode normalization attack tests (coding_agent_session_search-13za) ---
+
+    #[test]
+    fn test_integrity_unicode_combining_long_solidus_overlay_blocked() {
+        // U+0338 COMBINING LONG SOLIDUS OVERLAY - could visually disguise characters
+        assert_integrity_path_blocked(".\u{0338}./etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_combining_short_solidus_overlay_blocked() {
+        // U+0337 COMBINING SHORT SOLIDUS OVERLAY
+        assert_integrity_path_blocked(".\u{0337}./etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_rtl_override_blocked() {
+        // U+202E RIGHT-TO-LEFT OVERRIDE - can visually reverse path display
+        // This could make "etc/passwd/../" appear as a safe path when it's actually traversal
+        assert_integrity_path_blocked("etc/passwd/\u{202E}../");
+    }
+
+    #[test]
+    fn test_integrity_unicode_ltr_override_blocked() {
+        // U+202D LEFT-TO-RIGHT OVERRIDE - directional override
+        assert_integrity_path_blocked("\u{202D}../etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_rtl_embedding_blocked() {
+        // U+202B RIGHT-TO-LEFT EMBEDDING
+        assert_integrity_path_blocked("\u{202B}../etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_rtl_isolate_blocked() {
+        // U+2067 RIGHT-TO-LEFT ISOLATE
+        assert_integrity_path_blocked("\u{2067}../etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_zero_width_joiner_blocked() {
+        // U+200D ZERO WIDTH JOINER - invisible character that could split tokens
+        assert_integrity_path_blocked(".\u{200D}./etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_zero_width_non_joiner_blocked() {
+        // U+200C ZERO WIDTH NON-JOINER
+        assert_integrity_path_blocked(".\u{200C}./etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_zero_width_space_blocked() {
+        // U+200B ZERO WIDTH SPACE - invisible character
+        assert_integrity_path_blocked("..\u{200B}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_bom_blocked() {
+        // U+FEFF BYTE ORDER MARK (ZERO WIDTH NO-BREAK SPACE)
+        assert_integrity_path_blocked("\u{FEFF}../etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_fraction_slash_blocked() {
+        // U+2044 FRACTION SLASH - visually similar to /
+        assert_integrity_path_blocked("..\u{2044}etc\u{2044}passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_division_slash_blocked() {
+        // U+2215 DIVISION SLASH - visually similar to /
+        assert_integrity_path_blocked("..\u{2215}etc\u{2215}passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_big_solidus_blocked() {
+        // U+29F8 BIG SOLIDUS - another slash look-alike
+        assert_integrity_path_blocked("..\u{29F8}etc\u{29F8}passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_vai_full_stop_blocked() {
+        // U+A60E VAI FULL STOP - dot look-alike
+        assert_integrity_path_blocked("\u{A60E}\u{A60E}/etc/passwd");
+    }
+
+    #[test]
+    fn test_integrity_unicode_syriac_full_stop_blocked() {
+        // U+0701 SYRIAC SUPRALINEAR FULL STOP - dot look-alike
+        assert_integrity_path_blocked("\u{0701}\u{0701}/etc/passwd");
+    }
+
+    // --- NFD/NFC normalization form tests ---
+
+    #[test]
+    fn test_integrity_unicode_nfd_decomposed_not_exploitable() {
+        // NFD decomposition of certain characters could potentially be exploited
+        // For example, some characters have canonical decompositions
+        // This test verifies that legitimate paths with accented chars work
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path();
+
+        // Create a file with an accented filename (NFC form - precomposed)
+        let target = site_dir.join("café.txt");
+        fs::write(&target, "coffee").unwrap();
+
+        let hash = compute_file_hash(&target).unwrap();
+        let size = fs::metadata(&target).unwrap().len();
+        let mut files = BTreeMap::new();
+        files.insert(
+            "café.txt".to_string(),
+            IntegrityEntry { sha256: hash, size },
+        );
+
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
+        fs::write(
+            site_dir.join("integrity.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // Legitimate accented filenames should be allowed
+        let result = check_integrity(site_dir, false);
+        assert!(
+            result.passed,
+            "Legitimate accented filename should be allowed: {:?}",
+            result.details
+        );
+    }
+
+    // --- Unit tests for extended helper functions ---
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_combining_overlay() {
+        assert!(contains_unicode_path_attack("\u{0338}")); // COMBINING LONG SOLIDUS OVERLAY
+        assert!(contains_unicode_path_attack("\u{0337}")); // COMBINING SHORT SOLIDUS OVERLAY
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_zero_width() {
+        assert!(contains_unicode_path_attack("\u{200D}")); // ZERO WIDTH JOINER
+        assert!(contains_unicode_path_attack("\u{200C}")); // ZERO WIDTH NON-JOINER
+        assert!(contains_unicode_path_attack("\u{200B}")); // ZERO WIDTH SPACE
+        assert!(contains_unicode_path_attack("\u{FEFF}")); // BOM
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_rtl_overrides() {
+        assert!(contains_unicode_path_attack("\u{202E}")); // RTL OVERRIDE
+        assert!(contains_unicode_path_attack("\u{202D}")); // LTR OVERRIDE
+        assert!(contains_unicode_path_attack("\u{202B}")); // RTL EMBEDDING
+        assert!(contains_unicode_path_attack("\u{2067}")); // RTL ISOLATE
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_confusable_slashes() {
+        assert!(contains_unicode_path_attack("\u{2044}")); // FRACTION SLASH
+        assert!(contains_unicode_path_attack("\u{2215}")); // DIVISION SLASH
+        assert!(contains_unicode_path_attack("\u{29F8}")); // BIG SOLIDUS
+    }
+
+    #[test]
+    fn test_contains_unicode_path_attack_detects_confusable_dots() {
+        assert!(contains_unicode_path_attack("\u{A60E}")); // VAI FULL STOP
+        assert!(contains_unicode_path_attack("\u{0701}")); // SYRIAC SUPRALINEAR FULL STOP
+        assert!(contains_unicode_path_attack("\u{0702}")); // SYRIAC SUBLINEAR FULL STOP
+    }
+
+    #[test]
+    fn test_detect_encoded_path_violation_rtl_override() {
+        let result = detect_encoded_path_violation("etc/passwd/\u{202E}../");
+        assert_eq!(result, Some("unicode normalization attack".to_string()));
+    }
+
+    #[test]
+    fn test_detect_encoded_path_violation_zero_width_joiner() {
+        let result = detect_encoded_path_violation(".\u{200D}./etc/passwd");
+        assert_eq!(result, Some("unicode normalization attack".to_string()));
+    }
+
+    #[test]
+    fn test_detect_encoded_path_violation_fraction_slash() {
+        let result = detect_encoded_path_violation("..\u{2044}etc\u{2044}passwd");
+        assert_eq!(result, Some("unicode normalization attack".to_string()));
     }
 }

@@ -5,7 +5,7 @@
 # Exit code 0 = valid, non-zero = invalid
 #
 # Usage: ./scripts/validate-e2e-jsonl.sh [file.jsonl ...]
-#        ./scripts/validate-e2e-jsonl.sh test-results/e2e/*.jsonl
+#        ./scripts/validate-e2e-jsonl.sh test-results/e2e/*.jsonl test-results/e2e/**/cass.log
 #
 # Part of T7.1: JSONL log validator + CI gate
 
@@ -170,11 +170,12 @@ main() {
     # Get files to validate
     local files=("$@")
     if [[ ${#files[@]} -eq 0 ]]; then
-        # Default: validate all JSONL files in test-results/e2e
+        # Default: validate all JSONL logs in test-results/e2e (including per-test cass.log)
         if [[ -d "test-results/e2e" ]]; then
-            shopt -s nullglob
-            files=(test-results/e2e/*.jsonl)
-            shopt -u nullglob
+            while IFS= read -r -d '' file; do
+                files+=("$file")
+            done < <(find test-results/e2e -type f \( -name "*.jsonl" -o -name "cass.log" \) \
+                ! -name "trace.jsonl" ! -name "combined.jsonl" -print0 | sort -z)
         fi
     fi
 
