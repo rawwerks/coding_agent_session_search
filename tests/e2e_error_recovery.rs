@@ -29,64 +29,14 @@ use tempfile::TempDir;
 mod util;
 
 use util::ConversationFixtureBuilder;
-use util::e2e_log::{E2eLogger, E2ePhase};
+use util::e2e_log::PhaseTracker;
 
 // =============================================================================
 // E2E Logger Support
 // =============================================================================
 
-/// Check if E2E logging is enabled via environment variable.
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-/// Phase tracker for structured logging during error recovery tests.
-struct PhaseTracker {
-    logger: Option<E2eLogger>,
-}
-
-impl PhaseTracker {
-    fn new() -> Self {
-        let logger = if e2e_logging_enabled() {
-            E2eLogger::new("rust").ok()
-        } else {
-            None
-        };
-        Self { logger }
-    }
-
-    fn start(&self, name: &str, description: Option<&str>) -> Instant {
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_start(&phase);
-        }
-        Instant::now()
-    }
-
-    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_end(&phase, duration_ms);
-        }
-        eprintln!(
-            "{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-            name, duration_ms
-        );
-    }
-
-    #[allow(dead_code)]
-    fn flush(&self) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.flush();
-        }
-    }
+fn tracker_for(test_name: &str) -> PhaseTracker {
+    PhaseTracker::new("e2e_error_recovery", test_name)
 }
 
 // =============================================================================
@@ -184,7 +134,7 @@ fn truncate_file(path: &Path, keep_bytes: u64) -> anyhow::Result<()> {
 /// Test that opening a corrupted database returns an appropriate error.
 #[test]
 fn test_corrupted_database_detection() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_corrupted_database_detection");
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -242,7 +192,7 @@ fn test_corrupted_database_detection() {
 /// Test that a fresh database can be created after corruption is detected.
 #[test]
 fn test_corrupted_database_fresh_creation() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_corrupted_database_fresh_creation");
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -294,7 +244,7 @@ fn test_corrupted_database_fresh_creation() {
 /// Test that corrupted tantivy index triggers rebuild.
 #[test]
 fn test_corrupted_index_triggers_rebuild() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_corrupted_index_triggers_rebuild");
     let temp = TempDir::new().expect("create temp dir");
     let data_dir = temp.path().to_path_buf();
     let db_path = data_dir.join("agent_search.db");
@@ -377,7 +327,7 @@ fn test_corrupted_index_triggers_rebuild() {
 /// Test that export engine handles source database issues gracefully.
 #[test]
 fn test_export_handles_missing_source() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_export_handles_missing_source");
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("nonexistent.db");
     let export_path = temp.path().join("export.db");
@@ -449,7 +399,7 @@ fn test_export_handles_missing_source() {
 /// Test export rollback when destination write fails mid-operation.
 #[test]
 fn test_export_no_partial_on_interrupt() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_export_no_partial_on_interrupt");
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let export_path = temp.path().join("export.db");
@@ -509,7 +459,7 @@ fn test_export_no_partial_on_interrupt() {
 /// Test that truncated encrypted archive is detected.
 #[test]
 fn test_truncated_archive_detection() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_truncated_archive_detection");
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let archive_dir = temp.path().join("archive");
@@ -590,7 +540,7 @@ fn test_truncated_archive_detection() {
 /// Test that wrong password returns appropriate error, not corruption.
 #[test]
 fn test_wrong_password_clear_error() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_wrong_password_clear_error");
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let archive_dir = temp.path().join("archive");
@@ -663,7 +613,7 @@ fn test_wrong_password_clear_error() {
 fn test_permission_denied_export_directory() {
     use std::os::unix::fs::PermissionsExt;
 
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_permission_denied_export_directory");
     let temp = TempDir::new().expect("create temp dir");
     let source_path = temp.path().join("source.db");
     let readonly_dir = temp.path().join("readonly");
@@ -748,7 +698,7 @@ fn test_permission_denied_export_directory() {
 /// Test that database handles lock contention gracefully.
 #[test]
 fn test_database_lock_timeout() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_database_lock_timeout");
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -795,7 +745,7 @@ fn test_database_lock_timeout() {
 /// Test that database recovers from incomplete WAL checkpoint.
 #[test]
 fn test_wal_recovery() {
-    let tracker = PhaseTracker::new();
+    let tracker = tracker_for("test_wal_recovery");
     let temp = TempDir::new().expect("create temp dir");
     let db_path = temp.path().join("test.db");
 
@@ -873,7 +823,7 @@ mod unit_tests {
 
     #[test]
     fn test_phase_tracker_creation() {
-        let tracker = PhaseTracker::new();
+        let tracker = tracker_for("test_phase_tracker_creation");
         // Should not panic regardless of E2E_LOG setting
         let start = tracker.start("test", None);
         tracker.end("test", None, start);

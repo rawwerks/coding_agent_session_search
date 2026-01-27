@@ -16,68 +16,17 @@
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
-use std::time::Instant;
 use tempfile::TempDir;
 
 mod util;
 
-use util::e2e_log::{E2eLogger, E2ePhase};
+use util::e2e_log::PhaseTracker;
 
 // =============================================================================
 // E2E Logger Support
 // =============================================================================
 
-/// Check if E2E logging is enabled via environment variable.
-#[allow(dead_code)]
-fn e2e_logging_enabled() -> bool {
-    std::env::var("E2E_LOG").is_ok()
-}
-
-/// Phase tracker that uses E2eLogger when enabled.
-#[allow(dead_code)]
-struct PhaseTracker {
-    logger: Option<E2eLogger>,
-}
-
-#[allow(dead_code)]
-impl PhaseTracker {
-    fn new() -> Self {
-        let logger = if e2e_logging_enabled() {
-            E2eLogger::new("rust").ok()
-        } else {
-            None
-        };
-        Self { logger }
-    }
-
-    fn start(&self, name: &str, description: Option<&str>) -> Instant {
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_start(&phase);
-        }
-        Instant::now()
-    }
-
-    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        let phase = E2ePhase {
-            name: name.to_string(),
-            description: description.map(String::from),
-        };
-        if let Some(ref lg) = self.logger {
-            let _ = lg.phase_end(&phase, duration_ms);
-        }
-    }
-
-    fn flush(&self) {
-        if let Some(ref lg) = self.logger {
-            let _ = lg.flush();
-        }
-    }
-}
+// PhaseTracker is provided by util::e2e_log
 
 /// Create a minimal Codex session fixture.
 fn make_codex_session(root: &std::path::Path, content: &str, ts: u64) {
@@ -114,7 +63,7 @@ fn base_cmd() -> Command {
 
 /// Setup test environment with fixtures and run index.
 fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
-    let tracker = PhaseTracker::new();
+    let tracker = PhaseTracker::new("e2e_cli_flows", "setup_indexed_env");
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");

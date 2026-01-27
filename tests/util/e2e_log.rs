@@ -988,6 +988,7 @@ pub struct PhaseTracker {
     logger: Option<E2eLogger>,
     test_info: E2eTestInfo,
     start_time: Instant,
+    completed: bool,
 }
 
 #[allow(dead_code)]
@@ -1010,6 +1011,7 @@ impl PhaseTracker {
             logger,
             test_info,
             start_time: Instant::now(),
+            completed: false,
         }
     }
 
@@ -1070,7 +1072,8 @@ impl PhaseTracker {
     }
 
     /// Mark test as completed successfully.
-    pub fn complete(self) {
+    pub fn complete(mut self) {
+        self.completed = true;
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         if let Some(ref lg) = self.logger {
             let _ = lg.test_end(&self.test_info, "pass", duration_ms, None, None);
@@ -1079,7 +1082,8 @@ impl PhaseTracker {
     }
 
     /// Mark test as failed with error.
-    pub fn fail(self, error: E2eError) {
+    pub fn fail(mut self, error: E2eError) {
+        self.completed = true;
         let duration_ms = self.start_time.elapsed().as_millis() as u64;
         if let Some(ref lg) = self.logger {
             let _ = lg.test_end(&self.test_info, "fail", duration_ms, None, Some(error));
@@ -1090,6 +1094,26 @@ impl PhaseTracker {
     /// Flush the logger if present.
     pub fn flush(&self) {
         if let Some(ref lg) = self.logger {
+            let _ = lg.flush();
+        }
+    }
+}
+
+impl Drop for PhaseTracker {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Some(ref lg) = self.logger {
+            let duration_ms = self.start_time.elapsed().as_millis() as u64;
+            let panicking = std::thread::panicking();
+            let error = if panicking {
+                Some(E2eError::new("panic"))
+            } else {
+                None
+            };
+            let status = if panicking { "fail" } else { "pass" };
+            let _ = lg.test_end(&self.test_info, status, duration_ms, None, error);
             let _ = lg.flush();
         }
     }
