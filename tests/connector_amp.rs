@@ -145,11 +145,11 @@ fn amp_parses_alternate_fields() {
 
     assert_eq!(c.messages[0].role, "human");
     assert_eq!(c.messages[0].content, "Hello Amp");
-    assert_eq!(c.messages[0].created_at, Some(1000));
+    assert_eq!(c.messages[0].created_at, Some(1000000)); // 1000 seconds -> 1000000 ms
 
     assert_eq!(c.messages[1].role, "bot");
     assert_eq!(c.messages[1].content, "Hello Human");
-    assert_eq!(c.messages[1].created_at, Some(2000));
+    assert_eq!(c.messages[1].created_at, Some(2000000)); // 2000 seconds -> 2000000 ms
 }
 
 /// Test timestamp formats (ISO string vs Millis)
@@ -623,8 +623,8 @@ fn amp_computes_started_ended_at() {
     assert_eq!(convs.len(), 1);
 
     let c = &convs[0];
-    assert_eq!(c.started_at, Some(1000));
-    assert_eq!(c.ended_at, Some(3000));
+    assert_eq!(c.started_at, Some(1000000)); // 1000 seconds -> 1000000 ms
+    assert_eq!(c.ended_at, Some(3000000)); // 3000 seconds -> 3000000 ms
 }
 
 /// Test sequential index assignment

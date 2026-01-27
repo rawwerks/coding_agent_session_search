@@ -188,8 +188,8 @@ fn broken_symlink_is_handled_gracefully() {
 #[test]
 fn symlink_to_directory_is_followed() {
     let tmp = TempDir::new().unwrap();
-    let mock_claude = tmp.path().join("fixture-claude");
-    fs::create_dir_all(&mock_claude).unwrap();
+    let fixture_claude = tmp.path().join("fixture-claude");
+    fs::create_dir_all(&fixture_claude).unwrap();
 
     // Create actual project directory elsewhere
     let actual_projects = tmp.path().join("actual-projects/test-proj");
@@ -201,12 +201,12 @@ fn symlink_to_directory_is_followed() {
     .unwrap();
 
     // Create symlink to projects directory
-    let symlink = mock_claude.join("projects");
+    let symlink = fixture_claude.join("projects");
     unix_fs::symlink(tmp.path().join("actual-projects"), &symlink).unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: mock_claude,
+        data_dir: fixture_claude,
         scan_roots: Vec::new(),
         since_ts: None,
     };

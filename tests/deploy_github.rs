@@ -164,7 +164,7 @@ fn test_size_check_nested_directories() -> Result<()> {
 fn test_bundle_structure_validation() -> Result<()> {
     let temp = TempDir::new()?;
 
-    // Create a mock bundle structure
+    // Create a minimal test bundle structure
     fs::write(temp.path().join("index.html"), "<html></html>")?;
     fs::write(temp.path().join(".nojekyll"), "")?;
     fs::write(temp.path().join("robots.txt"), "User-agent: *\nDisallow: /")?;

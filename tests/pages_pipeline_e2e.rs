@@ -300,7 +300,7 @@ fn test_secret_scan_gating() {
     });
     assert!(
         found_api_key,
-        "Should detect the fake API key (openai_key pattern)"
+        "Should detect the test API key (openai_key pattern)"
     );
 
     // 2. Fail on secrets

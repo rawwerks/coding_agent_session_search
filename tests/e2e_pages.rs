@@ -32,6 +32,7 @@ use tempfile::TempDir;
 mod util;
 
 use util::ConversationFixtureBuilder;
+use util::e2e_log::{E2eLogger, E2ePhase};
 
 // =============================================================================
 // Test Constants
@@ -42,17 +43,73 @@ const TEST_RECOVERY_SECRET: &[u8] = b"recovery-secret-32bytes-padding!";
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB chunks
 
 // =============================================================================
-// Helper Functions
+// E2E Logger Support
 // =============================================================================
 
-/// Log a test phase with timing for CI parsing.
-fn log_phase(phase: &str, start: Instant) {
-    let duration_ms = start.elapsed().as_millis();
-    eprintln!(
-        "{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        phase, duration_ms
-    );
+/// Check if E2E logging is enabled via environment variable.
+fn e2e_logging_enabled() -> bool {
+    std::env::var("E2E_LOG").is_ok()
 }
+
+/// Phase tracker that uses E2eLogger when enabled.
+///
+/// Emits structured phase_start/phase_end events and also prints to stderr
+/// for CI parsing compatibility.
+struct PhaseTracker {
+    logger: Option<E2eLogger>,
+}
+
+impl PhaseTracker {
+    /// Create a new PhaseTracker, optionally with E2eLogger if E2E_LOG is set.
+    fn new() -> Self {
+        let logger = if e2e_logging_enabled() {
+            E2eLogger::new("rust").ok()
+        } else {
+            None
+        };
+        Self { logger }
+    }
+
+    /// Start a phase and return the start time for duration calculation.
+    fn start(&self, name: &str, description: Option<&str>) -> Instant {
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_start(&phase);
+        }
+        Instant::now()
+    }
+
+    /// End a phase, logging duration to E2eLogger and stderr.
+    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_end(&phase, duration_ms);
+        }
+        // Also emit to stderr for CI compatibility
+        eprintln!(
+            "{{\"phase\":\"{}\",\"duration_ms\":{},\"status\":\"PASS\"}}",
+            name, duration_ms
+        );
+    }
+
+    /// Flush the logger if present.
+    fn flush(&self) {
+        if let Some(ref lg) = self.logger {
+            let _ = lg.flush();
+        }
+    }
+}
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
 
 /// Setup a test database with conversations.
 fn setup_test_db(data_dir: &Path, conversation_count: usize) -> std::path::PathBuf {
@@ -112,17 +169,25 @@ fn build_full_pipeline(
     include_password: bool,
     include_recovery: bool,
 ) -> PipelineArtifacts {
+    let tracker = PhaseTracker::new();
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let data_dir = temp_dir.path().join("data");
     fs::create_dir_all(&data_dir).expect("Failed to create data directory");
 
     // Step 1: Setup database
-    let start = Instant::now();
+    let start = tracker.start(
+        "setup_database",
+        Some("Create test database with conversations"),
+    );
     let source_db_path = setup_test_db(&data_dir, conversation_count);
-    log_phase("setup_database", start);
+    tracker.end(
+        "setup_database",
+        Some("Create test database with conversations"),
+        start,
+    );
 
     // Step 2: Export
-    let start = Instant::now();
+    let start = tracker.start("export", Some("Export conversations to staging database"));
     let export_staging = temp_dir.path().join("export_staging");
     fs::create_dir_all(&export_staging).expect("Failed to create export staging");
     let export_db_path = export_staging.join("export.db");
@@ -143,10 +208,14 @@ fn build_full_pipeline(
         stats.conversations_processed > 0,
         "Should export at least one conversation"
     );
-    log_phase("export", start);
+    tracker.end(
+        "export",
+        Some("Export conversations to staging database"),
+        start,
+    );
 
     // Step 3: Encrypt
-    let start = Instant::now();
+    let start = tracker.start("encrypt", Some("Encrypt exported database with AES-GCM"));
     let encrypt_dir = temp_dir.path().join("encrypt_staging");
     let mut enc_engine = EncryptionEngine::new(CHUNK_SIZE);
 
@@ -165,10 +234,14 @@ fn build_full_pipeline(
     let _enc_config = enc_engine
         .encrypt_file(&export_db_path, &encrypt_dir, |_, _| {})
         .expect("Encryption failed");
-    log_phase("encrypt", start);
+    tracker.end(
+        "encrypt",
+        Some("Encrypt exported database with AES-GCM"),
+        start,
+    );
 
     // Step 4: Bundle
-    let start = Instant::now();
+    let start = tracker.start("bundle", Some("Create deployable web bundle"));
     let bundle_dir = temp_dir.path().join("bundle");
     let mut builder = BundleBuilder::new()
         .title("E2E Test Archive")
@@ -182,7 +255,9 @@ fn build_full_pipeline(
     let bundle = builder
         .build(&encrypt_dir, &bundle_dir, |_, _| {})
         .expect("Bundle failed");
-    log_phase("bundle", start);
+    tracker.end("bundle", Some("Create deployable web bundle"), start);
+
+    tracker.flush();
 
     PipelineArtifacts {
         export_db_path,
@@ -198,12 +273,14 @@ fn build_full_pipeline(
 /// Test the complete export pipeline with password-only authentication.
 #[test]
 fn test_full_export_pipeline_password_only() {
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_full_export_pipeline_password_only\",\"status\":\"START\"}}");
 
     let artifacts = build_full_pipeline(5, true, false);
 
     // Verify bundle structure
+    let verify_start = tracker.start("verify_structure", Some("Validate bundle artifacts exist"));
     let site = &artifacts.bundle.site_dir;
     assert!(site.join("index.html").exists(), "index.html should exist");
     assert!(site.join("sw.js").exists(), "sw.js should exist");
@@ -227,10 +304,15 @@ fn test_full_export_pipeline_password_only() {
         "Should use argon2id KDF"
     );
 
-    log_phase("verify_structure", start);
+    tracker.end(
+        "verify_structure",
+        Some("Validate bundle artifacts exist"),
+        verify_start,
+    );
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_full_export_pipeline_password_only\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }
 
@@ -289,13 +371,18 @@ fn test_full_export_pipeline_dual_auth() {
 /// Test that decrypted payload matches original export database.
 #[test]
 fn test_integrity_decrypt_roundtrip_password() {
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"status\":\"START\"}}");
 
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_full_pipeline(2, true, true);
 
     // Decrypt with password
+    let decrypt_start = tracker.start(
+        "decrypt_password",
+        Some("Decrypt payload using password-derived key"),
+    );
     let config = load_config(&artifacts.bundle.site_dir).expect("load config");
     let decryptor =
         DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock password");
@@ -312,23 +399,33 @@ fn test_integrity_decrypt_roundtrip_password() {
         "Decrypted content should match original"
     );
 
-    log_phase("decrypt_password", start);
+    tracker.end(
+        "decrypt_password",
+        Some("Decrypt payload using password-derived key"),
+        decrypt_start,
+    );
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_integrity_decrypt_roundtrip_password\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }
 
 /// Test that decrypted payload matches original using recovery key.
 #[test]
 fn test_integrity_decrypt_roundtrip_recovery() {
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"status\":\"START\"}}");
 
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_full_pipeline(2, true, true);
 
     // Decrypt with recovery key
+    let decrypt_start = tracker.start(
+        "decrypt_recovery",
+        Some("Decrypt payload using recovery secret"),
+    );
     let config = load_config(&artifacts.bundle.site_dir).expect("load config");
     let decryptor = DecryptionEngine::unlock_with_recovery(config, TEST_RECOVERY_SECRET)
         .expect("unlock recovery");
@@ -336,18 +433,33 @@ fn test_integrity_decrypt_roundtrip_recovery() {
     decryptor
         .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
         .expect("decrypt with recovery");
+    tracker.end(
+        "decrypt_recovery",
+        Some("Decrypt payload using recovery secret"),
+        decrypt_start,
+    );
 
     // Verify bytes match
+    let verify_start = tracker.start(
+        "verify_content",
+        Some("Compare decrypted content with original"),
+    );
     let original = fs::read(&artifacts.export_db_path).expect("read original");
     let decrypted = fs::read(&decrypted_path).expect("read decrypted");
     assert_eq!(
         original, decrypted,
         "Decrypted content should match original"
     );
+    tracker.end(
+        "verify_content",
+        Some("Compare decrypted content with original"),
+        verify_start,
+    );
 
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_integrity_decrypt_roundtrip_recovery\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }
 
@@ -358,17 +470,31 @@ fn test_integrity_decrypt_roundtrip_recovery() {
 /// Test that tampering with a chunk fails authentication.
 #[test]
 fn test_tampering_fails_authentication() {
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_tampering_fails_authentication\",\"status\":\"START\"}}");
 
     let artifacts = build_full_pipeline(2, true, false);
     let site_dir = &artifacts.bundle.site_dir;
 
     // Baseline: verify passes
+    let phase_start = tracker.start(
+        "verify_baseline",
+        Some("Verify bundle is valid before tampering"),
+    );
     let baseline = verify_bundle(site_dir, false).expect("verify baseline");
     assert_eq!(baseline.status, "valid", "Baseline should be valid");
+    tracker.end(
+        "verify_baseline",
+        Some("Verify bundle is valid before tampering"),
+        phase_start,
+    );
 
     // Find and corrupt a payload chunk
+    let phase_start = tracker.start(
+        "corrupt_chunk",
+        Some("Modify payload chunk to simulate tampering"),
+    );
     let payload_dir = site_dir.join("payload");
     let chunk = fs::read_dir(&payload_dir)
         .unwrap()
@@ -377,17 +503,32 @@ fn test_tampering_fails_authentication() {
         .find(|path| path.extension().map(|e| e == "bin").unwrap_or(false))
         .expect("payload chunk");
     fs::write(&chunk, b"corrupted payload data").expect("corrupt chunk");
+    tracker.end(
+        "corrupt_chunk",
+        Some("Modify payload chunk to simulate tampering"),
+        phase_start,
+    );
 
     // Verify should now detect corruption
+    let phase_start = tracker.start(
+        "verify_corruption_detected",
+        Some("Confirm verification detects tampering"),
+    );
     let result = verify_bundle(site_dir, false).expect("verify after corruption");
     assert_eq!(
         result.status, "invalid",
         "Corrupted bundle should be invalid"
     );
+    tracker.end(
+        "verify_corruption_detected",
+        Some("Confirm verification detects tampering"),
+        phase_start,
+    );
 
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_tampering_fails_authentication\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }
 
@@ -402,12 +543,14 @@ fn test_tampering_fails_authentication() {
 fn test_cli_verify_command() {
     use assert_cmd::cargo::cargo_bin_cmd;
 
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_cli_verify_command\",\"status\":\"START\"}}");
 
     let artifacts = build_full_pipeline(1, true, false);
 
     // Run cass pages --verify
+    let phase_start = tracker.start("cli_verify", Some("Execute cass pages --verify command"));
     let mut cmd = cargo_bin_cmd!("cass");
     let assert = cmd
         .arg("pages")
@@ -417,10 +560,16 @@ fn test_cli_verify_command() {
         .assert();
 
     assert.success();
+    tracker.end(
+        "cli_verify",
+        Some("Execute cass pages --verify command"),
+        phase_start,
+    );
 
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_cli_verify_command\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }
 
@@ -431,21 +580,32 @@ fn test_cli_verify_command() {
 /// Test that we can query the decrypted export database.
 #[test]
 fn test_search_in_decrypted_archive() {
-    let start = Instant::now();
+    let tracker = PhaseTracker::new();
+    let test_start = Instant::now();
     eprintln!("{{\"test\":\"test_search_in_decrypted_archive\",\"status\":\"START\"}}");
 
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_full_pipeline(5, true, false);
 
     // Decrypt
+    let phase_start = tracker.start("decrypt", Some("Decrypt payload to SQLite database"));
     let config = load_config(&artifacts.bundle.site_dir).expect("load config");
     let decryptor = DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock");
     let decrypted_path = temp_dir.path().join("decrypted.db");
     decryptor
         .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
         .expect("decrypt");
+    tracker.end(
+        "decrypt",
+        Some("Decrypt payload to SQLite database"),
+        phase_start,
+    );
 
     // Open the export database directly (it has a different schema than the main DB)
+    let phase_start = tracker.start(
+        "query_database",
+        Some("Query decrypted database to verify schema"),
+    );
     let conn = Connection::open(&decrypted_path).expect("open decrypted db");
 
     // Verify conversations table exists and has data
@@ -469,9 +629,15 @@ fn test_search_in_decrypted_archive() {
         )
         .expect("get schema version");
     assert_eq!(schema_version, "1", "Export schema version should be 1");
+    tracker.end(
+        "query_database",
+        Some("Query decrypted database to verify schema"),
+        phase_start,
+    );
 
+    tracker.flush();
     eprintln!(
         "{{\"test\":\"test_search_in_decrypted_archive\",\"duration_ms\":{},\"status\":\"PASS\"}}",
-        start.elapsed().as_millis()
+        test_start.elapsed().as_millis()
     );
 }

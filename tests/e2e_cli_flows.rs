@@ -7,14 +7,93 @@
 //! - Logging/trace output validation
 //!
 //! All tests use real fixtures and assert outputs (no mocks).
+//!
+//! # E2E Logging
+//!
+//! Tests emit structured JSONL logs via E2eLogger when `E2E_LOG=1` is set.
+//! See `test-results/e2e/SCHEMA.md` for log format.
 
 use assert_cmd::Command;
 use serde_json::Value;
 use std::fs;
+use std::time::Instant;
 use tempfile::TempDir;
 
 mod util;
 
+use util::e2e_log::{E2eLogger, E2ePhase};
+
+// =============================================================================
+// E2E Logger Support
+// =============================================================================
+
+/// Check if E2E logging is enabled via environment variable.
+#[allow(dead_code)]
+fn e2e_logging_enabled() -> bool {
+    std::env::var("E2E_LOG").is_ok()
+}
+
+/// Phase tracker that uses E2eLogger when enabled.
+#[allow(dead_code)]
+struct PhaseTracker {
+    logger: Option<E2eLogger>,
+}
+
+#[allow(dead_code)]
+impl PhaseTracker {
+    fn new() -> Self {
+        let logger = if e2e_logging_enabled() {
+            E2eLogger::new("rust").ok()
+        } else {
+            None
+        };
+        Self { logger }
+    }
+
+    fn start(&self, name: &str, description: Option<&str>) -> Instant {
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_start(&phase);
+        }
+        Instant::now()
+    }
+
+    fn end(&self, name: &str, description: Option<&str>, start: Instant) {
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let phase = E2ePhase {
+            name: name.to_string(),
+            description: description.map(String::from),
+        };
+        if let Some(ref lg) = self.logger {
+            let _ = lg.phase_end(&phase, duration_ms);
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(ref lg) = self.logger {
+            let _ = lg.flush();
+        }
+    }
+}
+
+/// Run a test function with optional E2eLogger instrumentation.
+///
+/// When `E2E_LOG=1` is set, emits structured JSONL events for:
+/// - test_start: when test begins
+/// - test_end: when test completes (pass/fail with duration)
+///
+/// # Example
+///
+/// ```ignore
+/// run_logged_test("search_basic_returns_valid_json", "cli_flows", file!(), line!(), || {
+///     let (tmp, data_dir) = setup_indexed_env();
+///     // ... test logic ...
+///     Ok(())
+/// });
+/// ```
 /// Create a minimal Codex session fixture.
 fn make_codex_session(root: &std::path::Path, content: &str, ts: u64) {
     let sessions = root.join("sessions/2024/12/01");
@@ -50,6 +129,7 @@ fn base_cmd() -> Command {
 
 /// Setup test environment with fixtures and run index.
 fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
+    let tracker = PhaseTracker::new();
     let tmp = TempDir::new().unwrap();
     let home = tmp.path();
     let codex_home = home.join(".codex");
@@ -57,13 +137,21 @@ fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
     let data_dir = home.join("cass_data");
     fs::create_dir_all(&data_dir).unwrap();
 
-    // Create Codex fixture
+    // Create fixtures
+    let phase_start = tracker.start(
+        "create_fixtures",
+        Some("Create Codex and Claude session fixtures"),
+    );
     make_codex_session(&codex_home, "authentication error in login", 1733011200000);
-
-    // Create Claude fixture
     make_claude_session(&claude_home, "myapp", "fix the database connection");
+    tracker.end(
+        "create_fixtures",
+        Some("Create Codex and Claude session fixtures"),
+        phase_start,
+    );
 
     // Run index
+    let phase_start = tracker.start("index", Some("Run full index on fixture sessions"));
     base_cmd()
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
@@ -71,7 +159,13 @@ fn setup_indexed_env() -> (TempDir, std::path::PathBuf) {
         .env("HOME", home)
         .assert()
         .success();
+    tracker.end(
+        "index",
+        Some("Run full index on fixture sessions"),
+        phase_start,
+    );
 
+    tracker.flush();
     (tmp, data_dir)
 }
 

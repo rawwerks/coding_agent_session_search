@@ -906,6 +906,7 @@ where
                     message: error.clone().unwrap_or_default(),
                     error_type: Some("TestFailure".to_string()),
                     stack: None,
+                    context: None,
                 },
             );
         }

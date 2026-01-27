@@ -712,14 +712,14 @@ fn connector_symlinked_directories_not_followed_by_default() {
     fs::write(&file, sample).unwrap();
 
     // Create symlink pointing to actual data
-    let mock_claude = dir.path().join("fixture-claude");
-    fs::create_dir_all(&mock_claude).unwrap();
-    let symlink_path = mock_claude.join("projects");
+    let fixture_claude = dir.path().join("fixture-claude");
+    fs::create_dir_all(&fixture_claude).unwrap();
+    let symlink_path = fixture_claude.join("projects");
     symlink(dir.path().join("actual-data/projects"), &symlink_path).unwrap();
 
     let conn = ClaudeCodeConnector::new();
     let ctx = ScanContext {
-        data_dir: mock_claude,
+        data_dir: fixture_claude,
         scan_roots: Vec::new(),
         since_ts: None,
     };

@@ -986,7 +986,7 @@ fn test_models_install_from_file_error() {
     // Note: Use CARGO_MANIFEST_DIR for robust path resolution regardless of cwd
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/models");
     let model_file = tmp.path().join("model.onnx");
-    fs::copy(fixture_dir.join("model.onnx.placeholder"), &model_file).unwrap();
+    fs::copy(fixture_dir.join("model.onnx"), &model_file).unwrap();
 
     let output = cargo_bin_cmd!("cass")
         .args(["models", "install", "--from-file"])

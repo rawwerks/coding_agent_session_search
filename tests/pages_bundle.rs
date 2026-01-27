@@ -375,7 +375,7 @@ mod tests {
         fs::create_dir_all(&encrypted_dir)?;
 
         // Create config.json but no payload/
-        let fake_config = serde_json::json!({
+        let test_config = serde_json::json!({
             "version": 2,
             "export_id": "test",
             "base_nonce": "test",
@@ -386,7 +386,7 @@ mod tests {
         });
         fs::write(
             encrypted_dir.join("config.json"),
-            serde_json::to_string(&fake_config)?,
+            serde_json::to_string(&test_config)?,
         )?;
 
         let builder = BundleBuilder::new();

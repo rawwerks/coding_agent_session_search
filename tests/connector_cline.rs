@@ -452,8 +452,8 @@ fn cline_sets_started_and_ended_at() {
     };
     let convs = conn.scan(&ctx).unwrap();
     assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].started_at, Some(1000));
-    assert_eq!(convs[0].ended_at, Some(5000));
+    assert_eq!(convs[0].started_at, Some(1000000)); // 1000 seconds -> 1000000 ms
+    assert_eq!(convs[0].ended_at, Some(5000000)); // 5000 seconds -> 5000000 ms
 }
 
 /// Test agent_slug is "cline"
@@ -525,8 +525,8 @@ fn cline_parses_alternate_timestamp_fields() {
     };
     let convs = conn.scan(&ctx).unwrap();
     assert_eq!(convs.len(), 1);
-    assert_eq!(convs[0].messages[0].created_at, Some(1000));
-    assert_eq!(convs[0].messages[1].created_at, Some(2000));
+    assert_eq!(convs[0].messages[0].created_at, Some(1000000)); // 1000 seconds -> 1000000 ms
+    assert_eq!(convs[0].messages[1].created_at, Some(2000000)); // 2000 seconds -> 2000000 ms
 }
 
 /// Test type field used as role when role is missing

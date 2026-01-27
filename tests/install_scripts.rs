@@ -194,7 +194,7 @@ fn upgrade_replaces_existing_binary() {
     .to_string();
     let dest = tempfile::TempDir::new().unwrap();
 
-    // Step 1: Create a fake "old" binary to simulate an existing installation
+    // Step 1: Create a test "old" binary to simulate an existing installation
     let bin_path = dest.path().join("cass");
     fs::write(&bin_path, "#!/bin/sh\necho 'old-version-0.0.1'\n").unwrap();
     #[cfg(unix)]

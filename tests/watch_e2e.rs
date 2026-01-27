@@ -46,6 +46,14 @@ fn run_watch_once(
 fn read_watch_state(path: &Path) -> std::collections::HashMap<String, i64> {
     let contents = std::fs::read_to_string(path)
         .unwrap_or_else(|_| panic!("missing watch_state at {}", path.display()));
+    // Handle new versioned format: {"v":1,"m":{"cx":123}} where "m" is the map
+    if let Ok(versioned) = serde_json::from_str::<serde_json::Value>(&contents)
+        && let Some(map) = versioned.get("m")
+        && let Ok(parsed) = serde_json::from_value(map.clone())
+    {
+        return parsed;
+    }
+    // Fallback to legacy format: {"Codex":123}
     serde_json::from_str(&contents).expect("parse watch_state")
 }
 
@@ -89,8 +97,12 @@ fn watch_mode_reindexes_on_file_change() {
     // Verify watch_state.json was updated for Codex connector
     let watch_state_path = data_dir.join("watch_state.json");
     let map = read_watch_state(&watch_state_path);
-    let ts = map.get("Codex").copied().unwrap_or(0);
-    assert!(ts > 0, "expected Codex entry in watch_state, got {map:?}");
+    // New format uses compact keys: "cx" for Codex
+    let ts = map.get("cx").copied().unwrap_or(0);
+    assert!(
+        ts > 0,
+        "expected Codex (cx) entry in watch_state, got {map:?}"
+    );
 }
 
 /// Ensure multiple paths (cross connectors) are handled and `watch_state` records both.
@@ -139,13 +151,14 @@ fn watch_mode_updates_multiple_connectors() {
     );
 
     let map = read_watch_state(&data_dir.join("watch_state.json"));
+    // New format uses compact keys: "cx" for Codex, "cd" for Claude
     assert!(
-        map.contains_key("Codex"),
-        "expected Codex entry, got {map:?}"
+        map.contains_key("cx"),
+        "expected Codex (cx) entry, got {map:?}"
     );
     assert!(
-        map.contains_key("Claude"),
-        "expected Claude entry, got {map:?}"
+        map.contains_key("cd"),
+        "expected Claude (cd) entry, got {map:?}"
     );
 }
 
@@ -183,7 +196,7 @@ fn watch_mode_handles_rapid_changes() {
         "first watch failed\nstdout:\n{stdout1}\nstderr:\n{stderr1}"
     );
     let ts1 = read_watch_state(&data_dir.join("watch_state.json"))
-        .get("Codex")
+        .get("cx")
         .copied()
         .unwrap_or(0);
     // Touch file quickly and rerun
@@ -205,7 +218,7 @@ fn watch_mode_handles_rapid_changes() {
         "second watch failed\nstdout:\n{stdout2}\nstderr:\n{stderr2}"
     );
     let ts2 = read_watch_state(&data_dir.join("watch_state.json"))
-        .get("Codex")
+        .get("cx")
         .copied()
         .unwrap_or(0);
     assert!(

@@ -344,7 +344,7 @@ fn tui_headless_reset_state_clears_persisted_state() {
         .assert()
         .success();
 
-    // Create a fake state file
+    // Create a test state file
     let state_file = data_dir.join("tui_state.json");
     fs::write(
         &state_file,
