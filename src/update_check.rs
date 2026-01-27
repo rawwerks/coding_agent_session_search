@@ -38,7 +38,15 @@ impl UpdateState {
         let path = state_path();
         match std::fs::read_to_string(&path) {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => {
+                let legacy = legacy_state_path();
+                if legacy != path {
+                    if let Ok(content) = std::fs::read_to_string(&legacy) {
+                        return serde_json::from_str(&content).unwrap_or_default();
+                    }
+                }
+                Self::default()
+            }
         }
     }
 
@@ -47,7 +55,15 @@ impl UpdateState {
         let path = state_path();
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => {
+                let legacy = legacy_state_path();
+                if legacy != path {
+                    if let Ok(content) = tokio::fs::read_to_string(&legacy).await {
+                        return serde_json::from_str(&content).unwrap_or_default();
+                    }
+                }
+                Self::default()
+            }
         }
     }
 
@@ -325,6 +341,13 @@ async fn fetch_latest_release() -> Result<GitHubRelease> {
 
 /// Get path to update state file
 fn state_path() -> PathBuf {
+    directories::ProjectDirs::from("com", "dicklesworthstone", "coding-agent-search").map_or_else(
+        || PathBuf::from("update_state.json"),
+        |dirs| dirs.data_dir().join("update_state.json"),
+    )
+}
+
+fn legacy_state_path() -> PathBuf {
     directories::ProjectDirs::from("com", "coding-agent-search", "coding-agent-search").map_or_else(
         || PathBuf::from("update_state.json"),
         |dirs| dirs.data_dir().join("update_state.json"),
