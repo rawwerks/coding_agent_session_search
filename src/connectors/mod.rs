@@ -1509,12 +1509,18 @@ mod tests {
         assert_eq!(lookups, 1);
         assert_eq!(hits, 1);
 
-        // Lookup that misses (bloom rejects)
-        let _ = cache.contains(&PathBuf::from("/definitely/not/a/workspace"));
-        let (lookups, rejections, _) = cache.stats();
+        // Lookup that misses - verify the result is correct and lookup is counted
+        // Note: We don't assert on rejections because bloom filters have false positives.
+        // The bloom might say "maybe present" (false positive) but the exact set will correctly
+        // return false. The important thing is that the overall `contains` result is correct.
+        let non_member = PathBuf::from("/definitely/not/a/workspace");
+        let result = cache.contains(&non_member);
+        assert!(
+            !result,
+            "non-member path should return false from contains()"
+        );
+        let (lookups, _, _) = cache.stats();
         assert_eq!(lookups, 2);
-        // The bloom filter should reject this completely unknown path
-        assert!(rejections >= 1);
     }
 
     #[test]

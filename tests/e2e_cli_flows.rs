@@ -79,21 +79,6 @@ impl PhaseTracker {
     }
 }
 
-/// Run a test function with optional E2eLogger instrumentation.
-///
-/// When `E2E_LOG=1` is set, emits structured JSONL events for:
-/// - test_start: when test begins
-/// - test_end: when test completes (pass/fail with duration)
-///
-/// # Example
-///
-/// ```ignore
-/// run_logged_test("search_basic_returns_valid_json", "cli_flows", file!(), line!(), || {
-///     let (tmp, data_dir) = setup_indexed_env();
-///     // ... test logic ...
-///     Ok(())
-/// });
-/// ```
 /// Create a minimal Codex session fixture.
 fn make_codex_session(root: &std::path::Path, content: &str, ts: u64) {
     let sessions = root.join("sessions/2024/12/01");
