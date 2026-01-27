@@ -452,3 +452,149 @@ e2e_run_test() {
         return $exit_code
     fi
 }
+
+# =============================================================================
+# Failure State Dump (rtpd)
+# =============================================================================
+
+# Dump failure state for debugging
+# Creates a comprehensive diagnostic dump when a test fails
+#
+# Usage: e2e_dump_failure_state "test_name" [temp_dir] [log_file] [db_path]
+#
+# Output: test-results/failure_dumps/<test_name>_<timestamp>.txt
+#
+e2e_dump_failure_state() {
+    local test_name="$1"
+    local temp_dir="${2:-}"
+    local log_file="${3:-}"
+    local db_path="${4:-}"
+
+    # Create failure dumps directory
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local project_root
+    project_root="$(cd "$script_dir/../.." && pwd)"
+    local dump_dir="${project_root}/test-results/failure_dumps"
+    mkdir -p "$dump_dir"
+
+    # Generate unique dump filename
+    local timestamp
+    timestamp=$(date +"%Y%m%d_%H%M%S")
+    local dump_file="${dump_dir}/${test_name}_${timestamp}.txt"
+
+    {
+        echo "=========================================="
+        echo "  FAILURE STATE DUMP"
+        echo "=========================================="
+        echo ""
+        echo "Test: $test_name"
+        echo "Time: $(date -Iseconds)"
+        echo "Run ID: ${E2E_RUN_ID:-unknown}"
+        echo ""
+
+        # 1. Environment variables (sanitized)
+        echo "=========================================="
+        echo "  ENVIRONMENT"
+        echo "=========================================="
+        echo ""
+        env | sort | while read -r line; do
+            # Redact sensitive values
+            case "$line" in
+                *PASSWORD*|*SECRET*|*TOKEN*|*KEY*|*CREDENTIAL*)
+                    echo "${line%%=*}=[REDACTED]"
+                    ;;
+                *)
+                    echo "$line"
+                    ;;
+            esac
+        done
+        echo ""
+
+        # 2. Working directory
+        echo "=========================================="
+        echo "  WORKING DIRECTORY"
+        echo "=========================================="
+        echo ""
+        echo "CWD: $(pwd)"
+        echo ""
+        ls -la 2>/dev/null || echo "(unable to list directory)"
+        echo ""
+
+        # 3. Temp directory listing
+        if [[ -n "$temp_dir" ]] && [[ -d "$temp_dir" ]]; then
+            echo "=========================================="
+            echo "  TEMP DIRECTORY: $temp_dir"
+            echo "=========================================="
+            echo ""
+            ls -laR "$temp_dir" 2>/dev/null || echo "(unable to list temp dir)"
+            echo ""
+        fi
+
+        # 4. Log tail
+        if [[ -n "$log_file" ]] && [[ -f "$log_file" ]]; then
+            echo "=========================================="
+            echo "  LOG TAIL (last 100 lines): $log_file"
+            echo "=========================================="
+            echo ""
+            tail -100 "$log_file" 2>/dev/null || echo "(unable to read log)"
+            echo ""
+        fi
+
+        # 5. Database state
+        if [[ -n "$db_path" ]] && [[ -f "$db_path" ]]; then
+            echo "=========================================="
+            echo "  DATABASE STATE: $db_path"
+            echo "=========================================="
+            echo ""
+            if command -v sqlite3 &>/dev/null; then
+                echo "--- Schema ---"
+                sqlite3 "$db_path" ".schema" 2>/dev/null || echo "(unable to read schema)"
+                echo ""
+                echo "--- Table counts ---"
+                sqlite3 "$db_path" "SELECT name || ': ' || (SELECT COUNT(*) FROM main." || name || ") FROM sqlite_master WHERE type='table';" 2>/dev/null || echo "(unable to count tables)"
+            else
+                echo "(sqlite3 not available)"
+            fi
+            echo ""
+        fi
+
+        # 6. Git state
+        echo "=========================================="
+        echo "  GIT STATE"
+        echo "=========================================="
+        echo ""
+        echo "Branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
+        echo "Commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+        echo ""
+        echo "--- Uncommitted changes ---"
+        git status --short 2>/dev/null || echo "(not a git repo or git unavailable)"
+        echo ""
+
+        # 7. Process info
+        echo "=========================================="
+        echo "  PROCESS INFO"
+        echo "=========================================="
+        echo ""
+        echo "PID: $$"
+        echo "User: $(whoami)"
+        if command -v free &>/dev/null; then
+            echo ""
+            echo "--- Memory ---"
+            free -h 2>/dev/null || true
+        fi
+        if [[ -f /proc/self/fd ]]; then
+            echo ""
+            echo "--- Open file handles ---"
+            ls -la /proc/self/fd 2>/dev/null | head -20 || true
+        fi
+        echo ""
+
+        echo "=========================================="
+        echo "  END OF DUMP"
+        echo "=========================================="
+    } > "$dump_file" 2>&1
+
+    echo "$dump_file"
+    _e2e_verbose_write "FAILURE_DUMP created: $dump_file"
+}

@@ -22,6 +22,7 @@
 
 use super::EnvGuard;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -1018,6 +1019,40 @@ impl E2eLogger {
         writer.flush()
     }
 
+    /// Emit a single metric value.
+    ///
+    /// Convenience method for emitting individual metrics without building a full
+    /// E2ePerformanceMetrics struct.
+    ///
+    /// # Example
+    /// ```ignore
+    /// logger.emit_metric("search_latency_p50_ms", 42.5, "ms")?;
+    /// ```
+    pub fn emit_metric(&self, name: &str, value: f64, unit: &str) -> std::io::Result<()> {
+        #[derive(Serialize)]
+        struct SingleMetricEvent {
+            ts: String,
+            event: String,
+            run_id: String,
+            runner: String,
+            name: String,
+            value: f64,
+            unit: String,
+        }
+
+        let event = SingleMetricEvent {
+            ts: Self::iso_timestamp(),
+            event: "metric".to_string(),
+            run_id: self.run_id.clone(),
+            runner: self.runner.clone(),
+            name: name.to_string(),
+            value,
+            unit: unit.to_string(),
+        };
+
+        self.write_event(&event)
+    }
+
     // Internal helpers
 
     fn write_event<T: Serialize>(&self, event: &T) -> std::io::Result<()> {
@@ -1748,6 +1783,229 @@ pub fn dump_failure_state(
 
     let dump_dir = FailureDump::dump_dir()?;
     Ok(dump_dir.join(format!("{}_{}_{}.txt", suite, test_name, dump.timestamp)))
+}
+
+// =============================================================================
+// Standalone Metric Emission & Baseline Tracking
+// =============================================================================
+
+/// Global metric file for standalone metric emission.
+static METRIC_FILE: std::sync::LazyLock<Mutex<Option<File>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Initialize the standalone metric file for a test run.
+///
+/// Call this at the start of a test suite to set up metric collection.
+#[allow(dead_code)]
+pub fn init_metrics_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = File::create(path)?;
+    let mut guard = METRIC_FILE.lock().unwrap();
+    *guard = Some(file);
+    Ok(())
+}
+
+/// Emit a single metric to the global metric file.
+///
+/// This is a convenience function that doesn't require an E2eLogger instance.
+/// Useful for quick metrics in shell-like test scenarios.
+///
+/// # Example
+/// ```ignore
+/// emit_metric("indexing_duration_ms", start.elapsed().as_millis() as f64, "ms")?;
+/// emit_metric("memory_peak_kb", peak_mem as f64, "KB")?;
+/// ```
+#[allow(dead_code)]
+pub fn emit_metric(name: &str, value: f64, unit: &str) -> std::io::Result<()> {
+    let run_id = std::env::var("CASS_RUN_ID").unwrap_or_else(|_| "unknown".to_string());
+    let ts = chrono::Utc::now().to_rfc3339();
+
+    let json = serde_json::json!({
+        "ts": ts,
+        "event": "metric",
+        "run_id": run_id,
+        "name": name,
+        "value": value,
+        "unit": unit
+    });
+
+    // Try global file first, fall back to stderr
+    if let Ok(mut guard) = METRIC_FILE.lock()
+        && let Some(ref mut file) = *guard
+    {
+        writeln!(file, "{}", json)?;
+        file.flush()?;
+    } else {
+        eprintln!("[METRIC] {}", json);
+    }
+
+    Ok(())
+}
+
+/// Metric baseline for regression tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricBaseline {
+    pub name: String,
+    pub value: f64,
+    pub unit: String,
+    pub timestamp: String,
+    pub commit: Option<String>,
+}
+
+/// Baseline comparison result.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct BaselineComparison {
+    pub name: String,
+    pub current: f64,
+    pub baseline: f64,
+    pub unit: String,
+    pub diff_pct: f64,
+    pub is_regression: bool,
+}
+
+/// Load baselines from the baselines.json file.
+#[allow(dead_code)]
+pub fn load_baselines() -> std::io::Result<HashMap<String, MetricBaseline>> {
+    let path = baselines_path()?;
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let content = fs::read_to_string(&path)?;
+    let baselines: Vec<MetricBaseline> = serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    Ok(baselines.into_iter().map(|b| (b.name.clone(), b)).collect())
+}
+
+/// Save baselines to the baselines.json file.
+#[allow(dead_code)]
+pub fn save_baselines(baselines: &HashMap<String, MetricBaseline>) -> std::io::Result<()> {
+    let path = baselines_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let values: Vec<_> = baselines.values().cloned().collect();
+    let content = serde_json::to_string_pretty(&values)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    fs::write(&path, content)
+}
+
+/// Update a single baseline value.
+#[allow(dead_code)]
+pub fn update_baseline(name: &str, value: f64, unit: &str) -> std::io::Result<()> {
+    let mut baselines = load_baselines()?;
+
+    // Get current git commit
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    baselines.insert(
+        name.to_string(),
+        MetricBaseline {
+            name: name.to_string(),
+            value,
+            unit: unit.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            commit,
+        },
+    );
+
+    save_baselines(&baselines)
+}
+
+/// Compare a metric value against its baseline.
+///
+/// Returns a comparison result indicating whether this is a regression (>20% worse).
+#[allow(dead_code)]
+pub fn compare_to_baseline(name: &str, value: f64, unit: &str) -> std::io::Result<BaselineComparison> {
+    let baselines = load_baselines()?;
+
+    let baseline = baselines.get(name).map(|b| b.value).unwrap_or(value);
+
+    let diff_pct = if baseline > 0.0 {
+        ((value - baseline) / baseline) * 100.0
+    } else {
+        0.0
+    };
+
+    // For most metrics, higher is worse (duration, memory).
+    // Consider >20% increase as regression.
+    let is_regression = diff_pct > 20.0;
+
+    Ok(BaselineComparison {
+        name: name.to_string(),
+        current: value,
+        baseline,
+        unit: unit.to_string(),
+        diff_pct,
+        is_regression,
+    })
+}
+
+/// Check a metric against baseline and emit an alert if regression detected.
+///
+/// Emits the metric, compares to baseline, and logs a warning if >20% regression.
+///
+/// # Example
+/// ```ignore
+/// let latency = measure_search_latency();
+/// check_metric_regression("search_latency_p50_ms", latency, "ms")?;
+/// ```
+#[allow(dead_code)]
+pub fn check_metric_regression(name: &str, value: f64, unit: &str) -> std::io::Result<BaselineComparison> {
+    // Emit the metric
+    emit_metric(name, value, unit)?;
+
+    // Compare to baseline
+    let comparison = compare_to_baseline(name, value, unit)?;
+
+    // Log if regression detected
+    if comparison.is_regression {
+        eprintln!(
+            "[REGRESSION ALERT] {}: {:.2}{} (baseline: {:.2}{}, +{:.1}%)",
+            name, value, unit, comparison.baseline, unit, comparison.diff_pct
+        );
+    }
+
+    Ok(comparison)
+}
+
+fn baselines_path() -> std::io::Result<PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    Ok(manifest_dir.join("test-results").join("baselines.json"))
+}
+
+/// Standard E2E metrics to collect per test run.
+///
+/// Use this as a checklist for what to measure in E2E tests.
+#[allow(dead_code)]
+pub mod standard_metrics {
+    /// Time to index the test corpus (ms)
+    pub const INDEXING_DURATION_MS: &str = "indexing_duration_ms";
+    /// Median search query time (ms)
+    pub const SEARCH_LATENCY_P50_MS: &str = "search_latency_p50_ms";
+    /// 99th percentile search time (ms)
+    pub const SEARCH_LATENCY_P99_MS: &str = "search_latency_p99_ms";
+    /// Peak memory usage (KB)
+    pub const MEMORY_PEAK_KB: &str = "memory_peak_kb";
+    /// Size of search index (bytes)
+    pub const INDEX_SIZE_BYTES: &str = "index_size_bytes";
+    /// Number of files indexed
+    pub const FILES_PROCESSED: &str = "files_processed";
+    /// Search throughput (queries per second)
+    pub const QUERIES_PER_SECOND: &str = "queries_per_second";
 }
 
 /// Run a test and emit structured logging events when E2E_LOG is enabled.
@@ -2510,5 +2768,93 @@ mod tests {
 
         // Clean up
         let _ = fs::remove_file(entries[0].path());
+    }
+
+    // ==================== Metric & Baseline tests ====================
+
+    #[test]
+    fn test_emit_metric_without_file() {
+        // emit_metric should not panic even without initialized file
+        let result = emit_metric("test_metric", 42.5, "ms");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_emit_metric_with_file() {
+        let tmp = TempDir::new().unwrap();
+        let metric_path = tmp.path().join("metrics.jsonl");
+
+        init_metrics_file(&metric_path).unwrap();
+        emit_metric("indexing_duration_ms", 123.45, "ms").unwrap();
+        emit_metric("memory_peak_kb", 50000.0, "KB").unwrap();
+
+        // Reset the global file for other tests
+        {
+            let mut guard = METRIC_FILE.lock().unwrap();
+            *guard = None;
+        }
+
+        // Verify content
+        let content = fs::read_to_string(&metric_path).unwrap();
+        assert!(content.contains("indexing_duration_ms"));
+        assert!(content.contains("123.45"));
+        assert!(content.contains("memory_peak_kb"));
+        assert!(content.contains("50000"));
+    }
+
+    #[test]
+    fn test_baseline_save_load_roundtrip() {
+        // Use a temporary baselines file
+        let tmp = TempDir::new().unwrap();
+        let baseline_path = tmp.path().join("baselines.json");
+
+        // Create test baselines
+        let mut baselines = HashMap::new();
+        baselines.insert(
+            "test_metric".to_string(),
+            MetricBaseline {
+                name: "test_metric".to_string(),
+                value: 100.0,
+                unit: "ms".to_string(),
+                timestamp: "2026-01-27T00:00:00Z".to_string(),
+                commit: Some("abc123".to_string()),
+            },
+        );
+
+        // Write directly to test path
+        let values: Vec<_> = baselines.values().cloned().collect();
+        let content = serde_json::to_string_pretty(&values).unwrap();
+        fs::write(&baseline_path, &content).unwrap();
+
+        // Read back
+        let loaded: Vec<MetricBaseline> =
+            serde_json::from_str(&fs::read_to_string(&baseline_path).unwrap()).unwrap();
+        let loaded_map: HashMap<_, _> = loaded.into_iter().map(|b| (b.name.clone(), b)).collect();
+
+        assert_eq!(loaded_map.len(), 1);
+        let loaded_metric = loaded_map.get("test_metric").unwrap();
+        assert_eq!(loaded_metric.value, 100.0);
+        assert_eq!(loaded_metric.unit, "ms");
+    }
+
+    #[test]
+    fn test_compare_to_baseline_no_regression() {
+        // When baseline doesn't exist, no regression is detected
+        let comparison = compare_to_baseline("nonexistent_metric", 100.0, "ms").unwrap();
+        assert!(!comparison.is_regression);
+        assert_eq!(comparison.current, 100.0);
+        assert_eq!(comparison.baseline, 100.0); // Falls back to current value
+    }
+
+    #[test]
+    fn test_standard_metrics_constants() {
+        // Verify standard metric names are defined
+        assert_eq!(standard_metrics::INDEXING_DURATION_MS, "indexing_duration_ms");
+        assert_eq!(standard_metrics::SEARCH_LATENCY_P50_MS, "search_latency_p50_ms");
+        assert_eq!(standard_metrics::SEARCH_LATENCY_P99_MS, "search_latency_p99_ms");
+        assert_eq!(standard_metrics::MEMORY_PEAK_KB, "memory_peak_kb");
+        assert_eq!(standard_metrics::INDEX_SIZE_BYTES, "index_size_bytes");
+        assert_eq!(standard_metrics::FILES_PROCESSED, "files_processed");
+        assert_eq!(standard_metrics::QUERIES_PER_SECOND, "queries_per_second");
     }
 }

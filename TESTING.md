@@ -228,6 +228,131 @@ let fixture = include_str!("fixtures/connectors/claude/session.jsonl");
 let mock_session = r#"{"fake": "data"}"#;  // NO!
 ```
 
+### Model Fixtures for Semantic Search
+
+For tests that require embedding models (semantic search, reranking), use the real
+model fixtures in `tests/fixtures/models/`:
+
+```
+tests/fixtures/models/
+├── xenova-paraphrase-minilm-l3-v2-int8/   # Embedding model (~17 MB)
+│   ├── model.onnx
+│   ├── tokenizer.json
+│   ├── config.json
+│   └── checksums.sha256
+├── xenova-ms-marco-minilm-l6-v2-int8/     # Reranker model (~22 MB)
+│   ├── model.onnx
+│   ├── tokenizer.json
+│   └── checksums.sha256
+└── README.md
+```
+
+**Usage in tests:**
+
+```rust
+use crate::fixture_helpers::{embedder_fixture_dir, reranker_fixture_dir};
+
+#[test]
+fn test_semantic_search() {
+    // Get fixture directories with real ONNX models
+    let embedder_dir = embedder_fixture_dir();
+    let reranker_dir = reranker_fixture_dir();
+
+    // Verify checksums before loading
+    verify_model_fixture_checksums(&embedder_dir).expect("valid checksums");
+
+    // Now load and use the real model
+    // ...
+}
+```
+
+**Model sources:**
+- Embedding: `Xenova/paraphrase-MiniLM-L3-v2` (Apache-2.0)
+- Reranker: `Xenova/ms-marco-MiniLM-L-6-v2` (Apache-2.0)
+
+### SSH Test Fixtures
+
+SSH-related tests use Docker containers with a real SSH server:
+
+**Docker infrastructure:**
+```
+tests/docker/
+├── Dockerfile.sshd    # SSH server image
+└── entrypoint.sh      # Container startup script
+```
+
+**Probe fixtures:** `tests/fixtures/sources/probe/`
+- `indexed_host.json` - Host with cass indexed (847 sessions)
+- `not_indexed_host.json` - Host with cass but not indexed
+- `no_cass_host.json` - Host without cass installed
+- `unreachable_host.json` - Connection failure scenario
+
+**Usage:**
+
+```rust
+use crate::ssh_test_helper::SshTestServer;
+
+#[test]
+#[ignore = "requires Docker"]
+fn test_ssh_sync() {
+    // Start ephemeral SSH server with auto-generated keys
+    let server = SshTestServer::start().expect("SSH server should start");
+
+    // Use server.ssh_target() for connections
+    let target = server.ssh_target();
+    // ... run SSH-based tests ...
+
+    // Container auto-cleaned on drop
+}
+```
+
+**Running SSH tests:**
+```bash
+# Build SSH test image first
+docker build -t cass-ssh-test:latest -f tests/docker/Dockerfile.sshd tests/docker/
+
+# Run ignored tests (requires Docker)
+cargo test -- --ignored
+```
+
+### PTY-Based TUI Testing
+
+TUI tests support two modes:
+
+1. **Headless mode** (`--once` + `TUI_HEADLESS=1`):
+   - Non-interactive, exits immediately after init
+   - Validates launch, exit codes, no panics
+   - Used in `tests/tui_smoke.rs`, `tests/tui_headless_smoke.rs`
+
+2. **Flow simulation** (via CLI equivalents):
+   - Search/filter/export flows simulated via CLI commands
+   - Results compared against TUI behavior expectations
+   - Artifacts captured under `test-results/e2e/tui/`
+   - Used in `tests/e2e_tui_smoke_flows.rs`
+
+**Example headless test:**
+```rust
+cargo_bin_cmd!("cass")
+    .arg("tui")
+    .arg("--once")
+    .arg("--data-dir")
+    .arg(&data_dir)
+    .env("TUI_HEADLESS", "1")
+    .assert()
+    .success();
+```
+
+**Artifacts:** TUI E2E tests capture:
+- Per-step stdout/stderr
+- Search results as JSON
+- Timing metrics
+- Summary JSON with trace ID
+
+Stored in: `test-results/e2e/tui/<trace_id>_*.txt`
+
+**Note:** Full PTY-based interactive testing (sending real keystrokes) would require
+a PTY crate (e.g., `portable_pty`). Current tests use headless mode with CLI equivalents.
+
 ---
 
 ## Running Tests
@@ -537,4 +662,4 @@ fn test_parsing() { }
 
 ---
 
-*Last updated: 2026-01-26*
+*Last updated: 2026-01-27*
