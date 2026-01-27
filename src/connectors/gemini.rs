@@ -68,14 +68,13 @@ fn extract_path_from_position(content: &str, start: usize) -> Option<PathBuf> {
         (rest, None)
     };
 
-    // Find the end of the path (whitespace, newline, delimiter, or certain punctuation)
+    // Find the end of the path
     let end = rest
         .find(|c: char| {
             if let Some(d) = delimiter {
                 c == d
             } else {
                 c.is_whitespace()
-                    || c == '\n'
                     || c == '>'
                     || c == '"'
                     || c == '\''
