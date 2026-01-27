@@ -639,6 +639,12 @@ fn scan_text(
         if is_allowlisted(candidate, config) {
             continue;
         }
+        // Heuristic: Pure alphabetic strings are likely code identifiers (CamelCase), not secrets.
+        // Secrets usually have digits or symbols.
+        if candidate.chars().all(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+
         let entropy = shannon_entropy(candidate);
         if entropy >= config.entropy_threshold {
             push_finding(

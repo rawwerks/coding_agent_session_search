@@ -846,6 +846,8 @@ pub struct SearchResult {
     pub cache_stats: CacheStats,
     /// Did-you-mean suggestions when hits are empty or sparse
     pub suggestions: Vec<QuerySuggestion>,
+    /// ANN search statistics (present when --approximate was used)
+    pub ann_stats: Option<crate::search::ann_index::AnnSearchStats>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2648,6 +2650,7 @@ impl SearchClient {
                 wildcard_fallback: false,
                 cache_stats: baseline_stats,
                 suggestions,
+                ann_stats: None,
             });
         }
 
@@ -2686,6 +2689,7 @@ impl SearchClient {
                 wildcard_fallback: true,
                 cache_stats: fallback_stats,
                 suggestions,
+                ann_stats: None,
             })
         } else {
             // Keep original results even if sparse
@@ -2700,6 +2704,7 @@ impl SearchClient {
                 wildcard_fallback: false,
                 cache_stats: baseline_stats,
                 suggestions,
+                ann_stats: None,
             })
         }
     }
@@ -2724,6 +2729,7 @@ impl SearchClient {
                 wildcard_fallback: false,
                 cache_stats: self.cache_stats(),
                 suggestions: Vec::new(),
+                ann_stats: None,
             });
         }
 
