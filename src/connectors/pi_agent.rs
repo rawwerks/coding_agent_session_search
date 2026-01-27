@@ -1099,4 +1099,275 @@ mod tests {
 
         assert_eq!(convs[0].messages[0].author, Some("gpt-4-turbo".to_string()));
     }
+
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =========================================================================
+
+    #[test]
+    fn edge_empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[""]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &["   ", "\t", "  "]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_truncated_jsonl_mid_json_returns_partial_results() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Valid"}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"assis"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn edge_invalid_utf8_causes_read_error() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        // Pi-Agent uses read_to_string which will fail on invalid UTF-8
+        let file_path = storage
+            .join("sessions")
+            .join("2025-12-01T10-00-00_uuid1.jsonl");
+        std::fs::write(&file_path, b"\xff\xfe invalid utf8 line").unwrap();
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        // read_to_string propagates the error via ?
+        let result = connector.scan(&ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn edge_bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        // UTF-8 BOM + valid JSONL
+        let mut data = vec![0xEF, 0xBB, 0xBF];
+        data.extend_from_slice(
+            br#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"BOM"}}"#,
+        );
+        let file_path = storage
+            .join("sessions")
+            .join("2025-12-01T10-00-00_uuid1.jsonl");
+        std::fs::write(&file_path, &data).unwrap();
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        // BOM may cause first line parse failure; subsequent lines should still work
+        // With only one line, may get 0 conversations
+        assert!(convs.len() <= 1);
+    }
+
+    #[test]
+    fn edge_json_type_mismatch_skips_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            // type is a number instead of string
+            r#"{"type": 42, "message": {"role": "user", "content": "Bad type field"}}"#,
+            // Valid line after
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Valid"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn edge_deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        // Message with deeply nested content in the message object
+        let mut nested = String::from(
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"deep","extra":"#,
+        );
+        for _ in 0..200 {
+            nested.push_str(r#"{"a":"#);
+        }
+        nested.push_str(r#""leaf""#);
+        for _ in 0..200 {
+            nested.push('}');
+        }
+        nested.push_str("}}");
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[&nested]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        // Should not stack overflow
+        let result = connector.scan(&ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn edge_large_message_body_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let large_content = "x".repeat(1_000_000);
+        let line = format!(
+            r#"{{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{{"role":"user","content":"{}"}}}}"#,
+            large_content
+        );
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[&line]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn edge_null_bytes_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"hello\u0000world"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages[0].content.contains("hello"));
+    }
+
+    // ---- Pi-Agent-specific edge cases ----
+
+    #[test]
+    fn edge_message_without_nested_message_object_skipped() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            // "message" type entry but missing the inner "message" object
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z"}"#,
+            // Valid message after
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:01Z","message":{"role":"user","content":"Valid"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn edge_unknown_entry_types_skipped_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            r#"{"type":"unknown_new_type","data":"whatever"}"#,
+            r#"{"type":"another_future_type","payload":{"nested":true}}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Still works"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Still works");
+    }
+
+    #[test]
+    fn edge_model_change_before_any_messages() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let lines = vec![
+            r#"{"type":"model_change","provider":"google","modelId":"gemini-2.0-flash"}"#,
+            r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus"}"#,
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"assistant","content":"After two model changes"}}"#,
+        ];
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &lines);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        // Should use the latest model_change
+        assert_eq!(
+            convs[0].messages[0].author,
+            Some("claude-opus".to_string())
+        );
+    }
+
+    #[test]
+    fn edge_content_array_with_unknown_block_types() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        let content = json!([
+            {"type": "text", "text": "Known type"},
+            {"type": "future_block_type", "data": "unknown"},
+            {"type": "another_new_type"},
+            {"type": "text", "text": "Also known"}
+        ]);
+        let line = format!(
+            r#"{{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{{"role":"assistant","content":{}}}}}"#,
+            content
+        );
+        write_session_file(&storage, "2025-12-01T10-00-00_uuid1.jsonl", &[&line]);
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        let msg = &convs[0].messages[0].content;
+        assert!(msg.contains("Known type"));
+        assert!(msg.contains("Also known"));
+        // Unknown types should be silently skipped
+        assert!(!msg.contains("future_block_type"));
+    }
+
+    #[test]
+    fn edge_session_file_without_underscore_ignored() {
+        let dir = TempDir::new().unwrap();
+        let storage = create_pi_agent_storage(&dir);
+        // File without underscore should not be picked up
+        let sessions_dir = storage.join("sessions");
+        fs::write(
+            sessions_dir.join("no-underscore.jsonl"),
+            r#"{"type":"message","timestamp":"2025-12-01T10:00:00Z","message":{"role":"user","content":"Should be ignored"}}"#,
+        )
+        .unwrap();
+
+        let connector = PiAgentConnector::new();
+        let ctx = ScanContext::local_default(storage.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
 }

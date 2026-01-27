@@ -1035,4 +1035,276 @@ mod tests {
         let cache = AmpConnector::cache_root();
         assert!(roots.contains(&cache));
     }
+
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =========================================================================
+
+    #[test]
+    fn edge_empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        fs::write(amp_dir.join("thread.json"), "").unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        fs::write(amp_dir.join("thread.json"), "   \n\n\t  ").unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_truncated_json_file_handled() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // JSON truncated mid-object
+        fs::write(
+            amp_dir.join("thread.json"),
+            r#"{"messages": [{"role": "user", "content": "hel"#,
+        )
+        .unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_invalid_utf8_file_skipped() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // Write raw bytes that are invalid UTF-8
+        std::fs::write(amp_dir.join("thread.json"), b"\xff\xfe{\"messages\":[]}").unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // UTF-8 BOM + valid JSON
+        let mut data = vec![0xEF, 0xBB, 0xBF];
+        data.extend_from_slice(
+            br#"{"messages":[{"role":"user","content":"BOM test"}]}"#,
+        );
+        std::fs::write(amp_dir.join("thread.json"), &data).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        // BOM may cause JSON parse failure since serde_json doesn't strip BOM
+        // The connector should skip the file gracefully either way
+        assert!(convs.len() <= 1);
+    }
+
+    #[test]
+    fn edge_json_type_mismatch_messages_not_array() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // messages is a string instead of an array
+        let content = json!({"messages": "not an array"});
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_json_type_mismatch_messages_is_number() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        let content = json!({"messages": 42});
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // Create deeply nested JSON (200 levels)
+        let mut nested = String::from(r#"{"messages":[{"role":"user","content":"deep","extra":"#);
+        for _ in 0..200 {
+            nested.push_str(r#"{"a":"#);
+        }
+        nested.push_str(r#""leaf""#);
+        for _ in 0..200 {
+            nested.push('}');
+        }
+        nested.push_str("}]}");
+        fs::write(amp_dir.join("thread.json"), &nested).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        // Should not stack overflow - either parses or skips gracefully
+        let result = connector.scan(&ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn edge_large_message_body_handled() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        let large_body = "x".repeat(1_000_000); // 1MB message
+        let content = json!({
+            "messages": [{"role": "user", "content": large_body}]
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn edge_null_bytes_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        let content = json!({
+            "messages": [{"role": "user", "content": "hello\u{0000}world"}]
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages[0].content.contains("hello"));
+    }
+
+    // ---- Amp-specific edge cases ----
+
+    #[test]
+    fn edge_uuid_filename_with_malformed_json() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // T-{uuid}.json format with invalid content
+        fs::write(
+            amp_dir.join("T-01872a67-152b-46af-a1af-4de6fce3d2b3.json"),
+            "not json",
+        )
+        .unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 0);
+    }
+
+    #[test]
+    fn edge_thread_nested_messages_malformed_inner() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // thread.messages exists but messages contain bad data
+        let content = json!({
+            "thread": {
+                "messages": [
+                    {"role": "user", "content": "Valid"},
+                    {"content": null},
+                    {"role": 42, "content": "Role is number"},
+                    {"role": "assistant"}  // no content at all
+                ]
+            }
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        // Should parse at least the valid messages, skip empty/null content
+        assert!(!convs.is_empty());
+        for conv in &convs {
+            for msg in &conv.messages {
+                assert!(!msg.content.trim().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn edge_all_content_field_fallbacks() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // Test text and body fallbacks
+        let content = json!({
+            "messages": [
+                {"role": "user", "text": "From text field"},
+                {"role": "assistant", "body": "From body field"}
+            ]
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].content, "From text field");
+        assert_eq!(convs[0].messages[1].content, "From body field");
+    }
+
+    #[test]
+    fn edge_iso_string_timestamp_parsing() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        let content = json!({
+            "messages": [
+                {"role": "user", "content": "Test", "sentAt": "2025-12-01T10:00:00Z"},
+                {"role": "assistant", "content": "Reply", "createdAt": "2025-12-01T10:00:01.500Z"}
+            ]
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        // Both messages should have parsed timestamps
+        assert!(convs[0].messages[0].created_at.is_some());
+        assert!(convs[0].messages[1].created_at.is_some());
+    }
+
+    #[test]
+    fn edge_mixed_role_key_variants() {
+        let dir = TempDir::new().unwrap();
+        let amp_dir = create_amp_dir(&dir);
+        // Uses "speaker" and "type" as role keys
+        let content = json!({
+            "messages": [
+                {"speaker": "human", "content": "Via speaker"},
+                {"type": "assistantMsg", "content": "Via type"}
+            ]
+        });
+        fs::write(amp_dir.join("thread.json"), content.to_string()).unwrap();
+
+        let connector = AmpConnector::new();
+        let ctx = ScanContext::local_default(amp_dir.clone(), None);
+        let convs = connector.scan(&ctx).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "human");
+        assert_eq!(convs[0].messages[1].role, "assistantMsg");
+    }
 }

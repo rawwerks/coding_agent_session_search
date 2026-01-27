@@ -1132,4 +1132,433 @@ mod tests {
         // We just verify it returns a valid result
         let _ = result.detected;
     }
+
+    // ==================== Edge case tests — malformed input robustness (br-3n1q) ====================
+
+    #[test]
+    fn empty_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        fs::write(chats_dir.join("session-empty.json"), b"").unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "empty file should not cause errors");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_file_returns_no_conversations() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        fs::write(chats_dir.join("session-ws.json"), "  \n\n  \t\n").unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "whitespace-only file should not cause errors"
+        );
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn truncated_json_file_handled() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // File truncated mid-JSON
+        fs::write(
+            chats_dir.join("session-trunc.json"),
+            r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "He"#,
+        )
+        .unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "truncated JSON should not cause errors");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_file_skipped() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Write invalid UTF-8 bytes
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"{\"sessionId\": \"s1\", ");
+        bytes.extend_from_slice(b"\xFF\xFE"); // Invalid UTF-8
+        bytes.extend_from_slice(b"}");
+        fs::write(chats_dir.join("session-badutf8.json"), &bytes).unwrap();
+
+        // Also write a valid session
+        fs::write(
+            chats_dir.join("session-good.json"),
+            r#"{"sessionId": "s2", "messages": [{"type": "user", "content": "Valid"}]}"#,
+        )
+        .unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "invalid UTF-8 file should be skipped gracefully"
+        );
+        let convs = result.unwrap();
+        // The valid session should still be parsed
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "Valid");
+    }
+
+    #[test]
+    fn bom_marker_at_file_start_handled() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // UTF-8 BOM followed by valid JSON
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xEF\xBB\xBF"); // UTF-8 BOM
+        bytes.extend_from_slice(
+            br#"{"sessionId": "s1", "messages": [{"type": "user", "content": "BOM test"}]}"#,
+        );
+        fs::write(chats_dir.join("session-bom.json"), &bytes).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        // BOM prepended to JSON will cause serde_json parse error, which is handled
+        assert!(result.is_ok(), "BOM marker should not cause errors");
+        // The BOM causes parse failure, so no conversations (graceful degradation)
+    }
+
+    #[test]
+    fn json_type_mismatch_messages_not_array() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // messages is a string instead of array
+        fs::write(
+            chats_dir.join("session-badtype.json"),
+            r#"{"sessionId": "s1", "messages": "not an array"}"#,
+        )
+        .unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "type mismatch should not cause errors");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn json_type_mismatch_messages_is_number() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        fs::write(
+            chats_dir.join("session-nummsgs.json"),
+            r#"{"sessionId": "s1", "messages": 42}"#,
+        )
+        .unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_json_does_not_stack_overflow() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Build deeply nested JSON (serde_json recursion limit ~128)
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+        fs::write(chats_dir.join("session-deep.json"), &nested).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "deeply nested JSON should not cause stack overflow"
+        );
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn large_message_body_handled() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        let large = "x".repeat(1_000_000);
+        let session_json = format!(
+            r#"{{"sessionId": "s1", "messages": [{{"type": "user", "content": "{}"}}]}}"#,
+            large
+        );
+        fs::write(chats_dir.join("session-large.json"), &session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(result.is_ok(), "large message body should not cause OOM");
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn null_bytes_in_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        let session_json =
+            r#"{"sessionId": "s1", "messages": [{"type": "user", "content": "before\u0000after"}]}"#;
+        fs::write(chats_dir.join("session-null.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "null bytes in content should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages.len() >= 1);
+    }
+
+    // ==================== Gemini-specific edge cases (br-3n1q) ====================
+
+    #[test]
+    fn multi_turn_conversation_threading() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Multi-turn with alternating user/model messages
+        let session_json = r#"{
+            "sessionId": "multi-turn",
+            "messages": [
+                {"type": "user", "content": "First question", "timestamp": "2025-01-15T10:00:00Z"},
+                {"type": "model", "content": "First answer", "timestamp": "2025-01-15T10:00:05Z"},
+                {"type": "user", "content": "Follow up", "timestamp": "2025-01-15T10:01:00Z"},
+                {"type": "model", "content": "More info", "timestamp": "2025-01-15T10:01:05Z"},
+                {"type": "user", "content": "Third turn", "timestamp": "2025-01-15T10:02:00Z"},
+                {"type": "model", "content": "Final answer", "timestamp": "2025-01-15T10:02:05Z"}
+            ]
+        }"#;
+        fs::write(chats_dir.join("session-multi.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 6);
+        // Verify alternating roles maintained
+        assert_eq!(convs[0].messages[0].role, "user");
+        assert_eq!(convs[0].messages[1].role, "assistant");
+        assert_eq!(convs[0].messages[2].role, "user");
+        assert_eq!(convs[0].messages[3].role, "assistant");
+        assert_eq!(convs[0].messages[4].role, "user");
+        assert_eq!(convs[0].messages[5].role, "assistant");
+        // Verify ended_at tracks latest timestamp
+        assert!(convs[0].ended_at.unwrap() > convs[0].started_at.unwrap());
+    }
+
+    #[test]
+    fn safety_filter_blocked_content_handled() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Model response with empty content (safety filter blocked)
+        let session_json = r#"{
+            "sessionId": "safety",
+            "messages": [
+                {"type": "user", "content": "Some question"},
+                {"type": "model", "content": ""},
+                {"type": "model", "content": "   "},
+                {"type": "model", "content": "Safe response after filter"}
+            ]
+        }"#;
+        fs::write(chats_dir.join("session-safety.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        // Empty/whitespace-only messages should be filtered out
+        assert_eq!(convs[0].messages.len(), 2);
+        assert_eq!(convs[0].messages[0].content, "Some question");
+        assert_eq!(convs[0].messages[1].content, "Safe response after filter");
+    }
+
+    #[test]
+    fn grounding_metadata_in_extra_preserved() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Message with grounding/citation metadata
+        let session_json = r#"{
+            "sessionId": "grounding",
+            "messages": [
+                {
+                    "type": "model",
+                    "content": "According to the documentation...",
+                    "groundingMetadata": {
+                        "citations": [
+                            {"uri": "https://example.com/docs", "title": "API Docs"}
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        fs::write(chats_dir.join("session-grounding.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let convs = connector.scan(&ctx).unwrap();
+
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "According to the documentation...");
+        // Grounding metadata should be preserved in extra field
+        assert!(
+            convs[0].messages[0].extra.get("groundingMetadata").is_some(),
+            "groundingMetadata should be preserved in extra"
+        );
+    }
+
+    #[test]
+    fn multipart_content_with_image_refs() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        // Multi-part content with text and inline data (image references)
+        let session_json = r#"{
+            "sessionId": "multipart",
+            "messages": [
+                {
+                    "type": "user",
+                    "content": [
+                        {"type": "text", "text": "What's in this image?"},
+                        {"type": "image_url", "url": "data:image/png;base64,iVBOR..."}
+                    ]
+                },
+                {
+                    "type": "model",
+                    "content": "I see a diagram showing..."
+                }
+            ]
+        }"#;
+        fs::write(chats_dir.join("session-multipart.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "multipart content with image refs should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages.len() >= 1);
+        // The text part should be extracted
+        assert!(convs[0].messages[0].content.contains("What's in this image"));
+    }
+
+    #[test]
+    fn timestamp_edge_cases() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("gemini_hash");
+        let chats_dir = hash_dir.join("chats");
+        fs::create_dir_all(&chats_dir).unwrap();
+
+        let session_json = r#"{
+            "sessionId": "ts-edge",
+            "startTime": 1700000000000,
+            "lastUpdated": "2025-12-01T10:00:00+05:30",
+            "messages": [
+                {"type": "user", "content": "Epoch millis start", "timestamp": 1700000000000},
+                {"type": "user", "content": "ISO with offset", "timestamp": "2025-12-01T10:00:00+05:30"},
+                {"type": "user", "content": "ISO with ms", "timestamp": "2025-12-01T10:00:00.123Z"},
+                {"type": "user", "content": "No timestamp"},
+                {"type": "user", "content": "Null ts", "timestamp": null}
+            ]
+        }"#;
+        fs::write(chats_dir.join("session-tsedge.json"), session_json).unwrap();
+
+        let connector = GeminiConnector::new();
+        let ctx = ScanContext::local_default(dir.path().to_path_buf(), None);
+        let result = connector.scan(&ctx);
+
+        assert!(
+            result.is_ok(),
+            "varied timestamp formats should not cause errors"
+        );
+        let convs = result.unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 5);
+        // First three should have valid timestamps
+        assert!(convs[0].messages[0].created_at.is_some());
+        assert!(convs[0].messages[1].created_at.is_some());
+        assert!(convs[0].messages[2].created_at.is_some());
+        // Session-level timestamps should be set
+        assert!(convs[0].started_at.is_some());
+        assert!(convs[0].ended_at.is_some());
+    }
 }

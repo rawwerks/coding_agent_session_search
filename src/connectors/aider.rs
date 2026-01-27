@@ -671,4 +671,155 @@ Done!"#;
         assert!(conv.messages[0].content.contains("`foo()`"));
         assert!(conv.messages[1].content.contains("\"bar\""));
     }
+
+    // =====================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =====================================================
+
+    #[test]
+    fn parse_chat_history_invalid_utf8_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // Write invalid UTF-8 bytes
+        fs::write(&history_file, b"\xFF\xFE invalid utf8 bytes here").unwrap();
+
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(&history_file);
+        // fs::read_to_string will fail on invalid UTF-8
+        assert!(result.is_err(), "invalid UTF-8 file should return an error");
+    }
+
+    #[test]
+    fn parse_chat_history_large_file_handled() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // Create a 1MB file with repeated user/assistant exchanges
+        let mut content = String::new();
+        for i in 0..1000 {
+            content.push_str(&format!("> User message number {}\n", i));
+            content.push_str(&format!("Assistant response number {}\n\n", i));
+        }
+        fs::write(&history_file, &content).unwrap();
+
+        let connector = AiderConnector::new();
+        let conv = connector.parse_chat_history(&history_file).unwrap();
+
+        assert!(
+            conv.messages.len() >= 2000,
+            "large file should produce many messages"
+        );
+    }
+
+    #[test]
+    fn parse_chat_history_bare_quote_marker_only() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // Lines with just ">" and no content
+        let content = ">\n>\n>\nAssistant response";
+        fs::write(&history_file, content).unwrap();
+
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(&history_file);
+        assert!(result.is_ok(), "bare quote markers should not cause errors");
+    }
+
+    #[test]
+    fn parse_chat_history_only_user_messages_no_assistant() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        let content = "> First user message\n> Second user message\n> Third user message";
+        fs::write(&history_file, content).unwrap();
+
+        let connector = AiderConnector::new();
+        let conv = connector.parse_chat_history(&history_file).unwrap();
+
+        // All user messages should be in a single user message
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].role, "user");
+    }
+
+    #[test]
+    fn parse_chat_history_only_assistant_no_user() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // No ">" prefix = not a user message; starts as system role
+        let content = "Just some text without any quote markers\nMore text here";
+        fs::write(&history_file, content).unwrap();
+
+        let connector = AiderConnector::new();
+        let conv = connector.parse_chat_history(&history_file).unwrap();
+
+        // Should produce a system message
+        assert!(!conv.messages.is_empty());
+        assert_eq!(conv.messages[0].role, "system");
+    }
+
+    #[test]
+    fn parse_chat_history_very_long_single_line() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        let long_line = format!("> {}", "x".repeat(1_000_000));
+        fs::write(&history_file, &long_line).unwrap();
+
+        let connector = AiderConnector::new();
+        let conv = connector.parse_chat_history(&history_file).unwrap();
+
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn parse_chat_history_null_bytes_in_content() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        let content = "> Hello\0World\nResponse\0here";
+        fs::write(&history_file, content).unwrap();
+
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(&history_file);
+        assert!(result.is_ok(), "null bytes should not cause errors");
+    }
+
+    #[test]
+    fn parse_chat_history_bom_marker_at_start() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // UTF-8 BOM followed by valid content
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\xEF\xBB\xBF> Hello after BOM\n");
+        bytes.extend_from_slice(b"Assistant response\n");
+        fs::write(&history_file, &bytes).unwrap();
+
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(&history_file);
+        assert!(result.is_ok(), "BOM marker should not cause errors");
+        let conv = result.unwrap();
+        // BOM may affect first line parsing but shouldn't crash
+        assert!(!conv.messages.is_empty());
+    }
+
+    #[test]
+    fn parse_chat_history_nonexistent_file_returns_error() {
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(Path::new("/nonexistent/file.md"));
+        assert!(result.is_err(), "nonexistent file should return error");
+    }
+
+    #[test]
+    fn parse_chat_history_mixed_line_endings() {
+        let dir = TempDir::new().unwrap();
+        let history_file = dir.path().join(".aider.chat.history.md");
+        // Mix of \r\n (Windows) and \n (Unix) line endings
+        let content = "> Hello\r\n> World\r\nAssistant response\nMore response\r\n";
+        fs::write(&history_file, content).unwrap();
+
+        let connector = AiderConnector::new();
+        let result = connector.parse_chat_history(&history_file);
+        assert!(result.is_ok(), "mixed line endings should not cause errors");
+        let conv = result.unwrap();
+        assert!(
+            conv.messages.len() >= 2,
+            "should extract user and assistant messages"
+        );
+    }
 }

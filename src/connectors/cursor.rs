@@ -1561,6 +1561,319 @@ mod tests {
         }
     }
 
+    // =========================================================================
+    // Edge case tests — malformed input robustness (br-2w98)
+    // =========================================================================
+
+    #[test]
+    fn truncated_json_in_db_value_returns_none() {
+        let key = "composerData:truncated-123";
+        // JSON truncated mid-object
+        let value = r#"{"text": "Hello", "tabs": [{"bubbles": [{"text": "Hi", "type":"#;
+
+        let mut seen = HashSet::new();
+        let conv = CursorConnector::parse_composer_data(
+            key,
+            value,
+            Path::new("/test"),
+            None,
+            &mut seen,
+            None,
+        );
+
+        assert!(conv.is_none(), "truncated JSON should not produce a conversation");
+    }
+
+    #[test]
+    fn json_type_mismatch_in_bubbles_skips_bad_entries() {
+        let key = "composerData:mismatch-123";
+        let value = json!({
+            "tabs": [{
+                "bubbles": [
+                    // String where object expected
+                    "not a bubble object",
+                    // Number instead of object
+                    42,
+                    // Null
+                    null,
+                    // Boolean
+                    true,
+                    // Valid entry that should still be extracted
+                    {"text": "Valid bubble", "type": "user"}
+                ]
+            }]
+        })
+        .to_string();
+
+        let mut seen = HashSet::new();
+        let conv = CursorConnector::parse_composer_data(
+            key,
+            &value,
+            Path::new("/test"),
+            None,
+            &mut seen,
+            None,
+        );
+
+        assert!(conv.is_some(), "should extract valid bubbles despite type mismatches");
+        let conv = conv.unwrap();
+        assert_eq!(conv.messages.len(), 1);
+        assert_eq!(conv.messages[0].content, "Valid bubble");
+    }
+
+    #[test]
+    fn deeply_nested_json_in_db_value_does_not_stack_overflow() {
+        let key = "composerData:deep-123";
+        // Build deeply nested JSON (200 levels) - serde_json has a recursion limit of 128
+        let mut nested = String::new();
+        for _ in 0..200 {
+            nested.push_str("{\"a\":");
+        }
+        nested.push('1');
+        for _ in 0..200 {
+            nested.push('}');
+        }
+
+        let mut seen = HashSet::new();
+        let conv = CursorConnector::parse_composer_data(
+            key,
+            &nested,
+            Path::new("/test"),
+            None,
+            &mut seen,
+            None,
+        );
+
+        // Should either parse or fail gracefully, never stack overflow
+        assert!(
+            conv.is_none(),
+            "deeply nested JSON without text/tabs should produce no conversation"
+        );
+    }
+
+    #[test]
+    fn large_message_body_in_bubble_handled() {
+        let key = "composerData:large-123";
+        let large_content = "x".repeat(1_000_000);
+        let value = json!({
+            "tabs": [{
+                "bubbles": [
+                    {"text": large_content, "type": "user"}
+                ]
+            }]
+        })
+        .to_string();
+
+        let mut seen = HashSet::new();
+        let conv = CursorConnector::parse_composer_data(
+            key,
+            &value,
+            Path::new("/test"),
+            None,
+            &mut seen,
+            None,
+        );
+
+        assert!(conv.is_some(), "large message body should not cause OOM");
+        let conv = conv.unwrap();
+        assert_eq!(conv.messages[0].content.len(), 1_000_000);
+    }
+
+    #[test]
+    fn corrupted_sqlite_db_does_not_panic() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("corrupted.vscdb");
+        fs::write(&db_path, "not a sqlite database at all").unwrap();
+
+        let result = CursorConnector::extract_from_db(&db_path, None);
+        // rusqlite may open the file lazily; query failures are caught with if-let-Ok
+        // The important thing is that it doesn't panic
+        match result {
+            Ok(convs) => assert!(convs.is_empty(), "corrupted DB should produce no conversations"),
+            Err(_) => {} // Error is also acceptable
+        }
+    }
+
+    #[test]
+    fn db_with_missing_tables_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("no_tables.vscdb");
+
+        // Create a valid SQLite DB but without the expected tables
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY, data TEXT)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = CursorConnector::extract_from_db(&db_path, None);
+        // Should not error even without expected tables
+        assert!(result.is_ok(), "missing tables should not cause an error");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn v040_headers_referencing_missing_bubbles_skips_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("state.vscdb");
+
+        let conn = create_test_db(&db_path);
+        // Insert composerData with fullConversationHeadersOnly referencing non-existent bubbles
+        let value = json!({
+            "fullConversationHeadersOnly": [
+                {"bubbleId": "nonexistent-1"},
+                {"bubbleId": "nonexistent-2"}
+            ]
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:v040-missing", &value],
+        )
+        .unwrap();
+        drop(conn);
+
+        let convs = CursorConnector::extract_from_db(&db_path, None).unwrap();
+        // Should not crash; no messages means no conversation
+        assert!(convs.is_empty(), "missing bubble references should produce no conversations");
+    }
+
+    #[test]
+    fn unexpected_numeric_type_in_bubble_defaults_to_assistant() {
+        // Bubble type values other than 1 (user) or 2 (assistant)
+        for type_val in [0, 3, -1, 999] {
+            let bubble = json!({
+                "text": "Unknown type bubble",
+                "type": type_val
+            });
+
+            let msg = CursorConnector::parse_bubble(&bubble, 0);
+            assert!(msg.is_some(), "type {} should still produce a message", type_val);
+            assert_eq!(
+                msg.unwrap().role,
+                "assistant",
+                "unknown numeric type {} should default to assistant",
+                type_val
+            );
+        }
+    }
+
+    #[test]
+    fn null_bytes_in_bubble_content_handled() {
+        let bubble = json!({
+            "text": "before\u{0000}after",
+            "type": "user"
+        });
+
+        let msg = CursorConnector::parse_bubble(&bubble, 0);
+        assert!(msg.is_some(), "null bytes in content should not cause errors");
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_entries_in_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("state.vscdb");
+
+        let conn = create_test_db(&db_path);
+
+        // Insert invalid JSON
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:invalid-1", "not valid json {{{"],
+        )
+        .unwrap();
+
+        // Insert valid entry
+        let valid_value = json!({ "text": "Valid entry" }).to_string();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:valid-1", &valid_value],
+        )
+        .unwrap();
+
+        // Insert empty JSON
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:empty-1", "{}"],
+        )
+        .unwrap();
+
+        // Insert another valid entry
+        let valid_value2 = json!({ "text": "Another valid" }).to_string();
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            ["composerData:valid-2", &valid_value2],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        let convs = CursorConnector::extract_from_db(&db_path, None).unwrap();
+        assert_eq!(
+            convs.len(),
+            2,
+            "should extract only the valid conversations, skipping invalid/empty"
+        );
+    }
+
+    #[test]
+    fn parse_workspace_uri_handles_malformed_uris() {
+        // Empty string
+        assert!(CursorConnector::parse_workspace_uri("").is_none());
+
+        // No scheme
+        assert!(CursorConnector::parse_workspace_uri("just/a/path").is_none());
+
+        // Unknown scheme
+        assert!(CursorConnector::parse_workspace_uri("ftp://host/path").is_none());
+
+        // file:// with path should work
+        let result = CursorConnector::parse_workspace_uri("file:///home/user/project");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), PathBuf::from("/home/user/project"));
+
+        // vscode-remote:// with no path separator
+        assert!(CursorConnector::parse_workspace_uri("vscode-remote://no-slash-here").is_none());
+
+        // URL-encoded file:// path
+        let result =
+            CursorConnector::parse_workspace_uri("file:///home/user/my%20project/src");
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap(),
+            PathBuf::from("/home/user/my project/src")
+        );
+    }
+
+    #[test]
+    fn since_ts_filtering_skips_old_conversations() {
+        let key = "composerData:old-conv";
+        let value = json!({
+            "text": "Old message",
+            "createdAt": 1000000000000i64,
+            "lastUpdatedAt": 1000000001000i64
+        })
+        .to_string();
+
+        let mut seen = HashSet::new();
+        // Set since_ts to after the conversation's lastUpdatedAt
+        let conv = CursorConnector::parse_composer_data(
+            key,
+            &value,
+            Path::new("/test"),
+            Some(1500000000000),
+            &mut seen,
+            None,
+        );
+
+        assert!(
+            conv.is_none(),
+            "conversation older than since_ts should be skipped"
+        );
+    }
+
     #[test]
     #[serial]
     #[cfg(target_os = "linux")] // Only test on Linux where XDG_DATA_HOME/HOME manipulation is predictable
