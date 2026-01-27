@@ -9940,10 +9940,10 @@ fn run_export(
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
-                    if session_start.map_or(true, |start| ts < start) {
+                    if session_start.is_none_or(|start| ts < start) {
                         session_start = Some(ts);
                     }
-                    if _session_end.map_or(true, |end| ts > end) {
+                    if _session_end.is_none_or(|end| ts > end) {
                         _session_end = Some(ts);
                     }
                 }
@@ -10183,10 +10183,10 @@ fn run_export_html(
             }
             if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(ts) = msg.get("timestamp").and_then(|t| t.as_i64()) {
-                    if session_start.map_or(true, |start| ts < start) {
+                    if session_start.is_none_or(|start| ts < start) {
                         session_start = Some(ts);
                     }
-                    if session_end.map_or(true, |end| ts > end) {
+                    if session_end.is_none_or(|end| ts > end) {
                         session_end = Some(ts);
                     }
                 }
@@ -13522,7 +13522,7 @@ fn run_mappings_test(source_name: &str, path: &str, agent: Option<&str>) -> CliR
                 continue;
             }
             if path.starts_with(&mapping.from)
-                && best_match.map_or(true, |best| mapping.from.len() > best.from.len())
+                && best_match.is_none_or(|best| mapping.from.len() > best.from.len())
             {
                 best_match = Some(mapping);
             }

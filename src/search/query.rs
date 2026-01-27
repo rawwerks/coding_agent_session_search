@@ -2373,7 +2373,10 @@ impl SearchClient {
         offset: usize,
         field_mask: FieldMask,
         approximate: bool,
-    ) -> Result<(Vec<SearchHit>, Option<crate::search::ann_index::AnnSearchStats>)> {
+    ) -> Result<(
+        Vec<SearchHit>,
+        Option<crate::search::ann_index::AnnSearchStats>,
+    )> {
         let field_mask = effective_field_mask(field_mask);
         let canonical = canonicalize_for_embedding(query);
         if canonical.trim().is_empty() {
