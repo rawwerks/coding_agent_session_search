@@ -874,7 +874,7 @@ impl VectorIndex {
     ) -> Result<Vec<VectorSearchResult>> {
         // Parallel scan with thread-local heaps.
         // Each chunk maintains its own top-k heap to avoid contention.
-        let partial_results: Vec<Vec<ScoredEntry>> = self
+        let partial_results: Result<Vec<Vec<ScoredEntry>>> = self
             .rows
             .par_chunks(PARALLEL_CHUNK_SIZE)
             .map(|chunk| {
@@ -885,11 +885,7 @@ impl VectorIndex {
                     {
                         continue;
                     }
-                    // Use unwrap_or(0.0) for errors in parallel path - errors are rare
-                    // and we don't want to propagate them across thread boundaries.
-                    let score = self
-                        .dot_product_at(row.vec_offset, query_vec)
-                        .unwrap_or(0.0);
+                    let score = self.dot_product_at(row.vec_offset, query_vec)?;
                     local_heap.push(std::cmp::Reverse(ScoredEntry {
                         score,
                         message_id: row.message_id,
@@ -900,9 +896,10 @@ impl VectorIndex {
                     }
                 }
                 // Extract entries from heap (they're wrapped in Reverse).
-                local_heap.into_iter().map(|r| r.0).collect()
+                Ok(local_heap.into_iter().map(|r| r.0).collect())
             })
             .collect();
+        let partial_results = partial_results?;
 
         // Merge thread-local results into final top-k.
         let mut final_heap = BinaryHeap::with_capacity(k + 1);

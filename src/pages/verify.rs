@@ -1130,12 +1130,16 @@ mod tests {
         let mut files = BTreeMap::new();
         files.insert(
             "../../../etc/passwd".to_string(),
-            super::bundle::IntegrityEntry {
+            crate::pages::bundle::IntegrityEntry {
                 sha256: "deadbeef".repeat(8),
                 size: 100,
             },
         );
-        let manifest = IntegrityManifest { files };
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         fs::write(site_dir.join("integrity.json"), manifest_json).unwrap();
 
@@ -1163,12 +1167,16 @@ mod tests {
         let mut files = BTreeMap::new();
         files.insert(
             "/etc/passwd".to_string(),
-            super::bundle::IntegrityEntry {
+            crate::pages::bundle::IntegrityEntry {
                 sha256: "deadbeef".repeat(8),
                 size: 100,
             },
         );
-        let manifest = IntegrityManifest { files };
+        let manifest = IntegrityManifest {
+            version: 1,
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            files,
+        };
         let manifest_json = serde_json::to_string(&manifest).unwrap();
         fs::write(site_dir.join("integrity.json"), manifest_json).unwrap();
 
