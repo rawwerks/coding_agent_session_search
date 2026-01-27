@@ -28,8 +28,8 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 mod util;
-use util::e2e_log::PhaseTracker;
 use util::EnvGuard;
+use util::e2e_log::PhaseTracker;
 
 // =============================================================================
 // Docker Management
@@ -80,8 +80,8 @@ impl DockerSshServer {
             .map_err(|e| format!("Failed to read public key: {e}"))?;
 
         // Build Docker image
-        let dockerfile_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/docker/Dockerfile.sshd");
+        let dockerfile_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/docker/Dockerfile.sshd");
 
         if !dockerfile_path.exists() {
             return Err(format!(
@@ -264,7 +264,11 @@ fn create_ssh_sources_config(
     identity_file: &Path,
     paths: &[&str],
 ) {
-    let paths_toml: String = paths.iter().map(|p| format!("\"{}\"", p)).collect::<Vec<_>>().join(", ");
+    let paths_toml: String = paths
+        .iter()
+        .map(|p| format!("\"{}\"", p))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let config_content = format!(
         r#"[[sources]]
@@ -364,7 +368,12 @@ fn ssh_sources_sync_rsync() {
     );
 
     // Create SSH config for the host
-    create_ssh_config(&home_dir, "docker-ssh-test", server.port(), server.key_path());
+    create_ssh_config(
+        &home_dir,
+        "docker-ssh-test",
+        server.port(),
+        server.key_path(),
+    );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
@@ -463,7 +472,12 @@ fn ssh_sources_provenance_tracking() {
         &["/root/.claude/projects", "/root/.codex/sessions"],
     );
 
-    create_ssh_config(&home_dir, "provenance-test", server.port(), server.key_path());
+    create_ssh_config(
+        &home_dir,
+        "provenance-test",
+        server.port(),
+        server.key_path(),
+    );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
@@ -600,7 +614,10 @@ fn ssh_sources_sync_sftp_fallback() {
     tracker.end("setup", Some("Create temp directories and config"), start);
 
     // Run sources sync - should fall back to SFTP
-    let start = tracker.start("sources_sync_sftp", Some("Run sources sync with SFTP fallback"));
+    let start = tracker.start(
+        "sources_sync_sftp",
+        Some("Run sources sync with SFTP fallback"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["sources", "sync", "--verbose"])
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -610,7 +627,11 @@ fn ssh_sources_sync_sftp_fallback() {
         .timeout(Duration::from_secs(120))
         .output()
         .expect("sources sync command");
-    tracker.end("sources_sync_sftp", Some("Run sources sync with SFTP fallback"), start);
+    tracker.end(
+        "sources_sync_sftp",
+        Some("Run sources sync with SFTP fallback"),
+        start,
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -693,7 +714,12 @@ fn ssh_sources_sync_multiple_paths() {
         ],
     );
 
-    create_ssh_config(&home_dir, "multi-path-test", server.port(), server.key_path());
+    create_ssh_config(
+        &home_dir,
+        "multi-path-test",
+        server.port(),
+        server.key_path(),
+    );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
@@ -709,7 +735,11 @@ fn ssh_sources_sync_multiple_paths() {
         .timeout(Duration::from_secs(120))
         .output()
         .expect("sources sync command");
-    tracker.end("sources_sync", Some("Run sources sync for multiple paths"), start);
+    tracker.end(
+        "sources_sync",
+        Some("Run sources sync for multiple paths"),
+        start,
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -802,7 +832,12 @@ to = "/home/localuser"
     fs::create_dir_all(config_file.parent().unwrap()).unwrap();
     fs::write(&config_file, config_content).unwrap();
 
-    create_ssh_config(&home_dir, "path-mapping-test", server.port(), server.key_path());
+    create_ssh_config(
+        &home_dir,
+        "path-mapping-test",
+        server.port(),
+        server.key_path(),
+    );
 
     let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
     let _guard_data = EnvGuard::set("XDG_DATA_HOME", data_dir.to_string_lossy());
@@ -828,10 +863,17 @@ to = "/home/localuser"
         .timeout(Duration::from_secs(120))
         .output();
 
-    tracker.end("sync_and_index", Some("Sync and index with path mappings"), start);
+    tracker.end(
+        "sync_and_index",
+        Some("Sync and index with path mappings"),
+        start,
+    );
 
     // Search and check workspace paths
-    let start = tracker.start("verify_rewrite", Some("Verify path rewriting in search results"));
+    let start = tracker.start(
+        "verify_rewrite",
+        Some("Verify path rewriting in search results"),
+    );
     let output = cargo_bin_cmd!("cass")
         .args(["search", "hello", "--json"])
         .env("XDG_CONFIG_HOME", &config_dir)
@@ -852,7 +894,11 @@ to = "/home/localuser"
             "Path should be rewritten from /root to /home/localuser"
         );
     }
-    tracker.end("verify_rewrite", Some("Verify path rewriting in search results"), start);
+    tracker.end(
+        "verify_rewrite",
+        Some("Verify path rewriting in search results"),
+        start,
+    );
 
     tracker.complete();
 }

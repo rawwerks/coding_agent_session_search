@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod util;
 use util::e2e_log::{E2eError, E2ePerformanceMetrics, PhaseTracker};
@@ -28,6 +28,39 @@ const EVENT_SPECIFIC_FIELDS: &[(&str, &[&str])] = &[
 ];
 
 const COMMON_FIELDS: &[&str] = &["ts", "event", "run_id", "runner"];
+
+fn is_log_file(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if name == "trace.jsonl" || name == "combined.jsonl" {
+            return false;
+        }
+        if name == "cass.log" {
+            return true;
+        }
+    }
+
+    path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+fn collect_jsonl_logs(root: &Path) -> Vec<PathBuf> {
+    fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, out);
+                } else if is_log_file(&path) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+
+    let mut logs = Vec::new();
+    visit(root, &mut logs);
+    logs.sort();
+    logs
+}
 
 /// Validate a single JSONL event object.
 fn validate_event(json: &Value) -> Result<(), String> {
@@ -132,12 +165,7 @@ fn jsonl_files_valid_schema() {
     }
 
     let phase_start = tracker.start("discover_files", Some("Find JSONL files"));
-    let jsonl_files: Vec<_> = fs::read_dir(e2e_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
-        .collect();
+    let jsonl_files = collect_jsonl_logs(e2e_dir);
     tracker.end("discover_files", Some("Find JSONL files"), phase_start);
 
     if jsonl_files.is_empty() {
@@ -223,6 +251,7 @@ fn jsonl_files_valid_schema() {
 #[test]
 fn jsonl_timestamps_are_rfc3339() {
     let tracker = tracker_for("jsonl_timestamps_are_rfc3339");
+    let _trace_guard = tracker.trace_env_guard();
 
     let e2e_dir = Path::new("test-results/e2e");
     if !e2e_dir.exists() {
@@ -234,21 +263,18 @@ fn jsonl_timestamps_are_rfc3339() {
     let mut checked = 0usize;
     let mut bad = Vec::new();
 
-    for entry in fs::read_dir(e2e_dir).unwrap().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "jsonl") {
-            let content = fs::read_to_string(&path).unwrap();
-            for (line_num, line) in content.lines().enumerate() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(json) = serde_json::from_str::<Value>(line)
-                    && let Some(ts) = json["ts"].as_str()
-                {
-                    checked += 1;
-                    if chrono::DateTime::parse_from_rfc3339(ts).is_err() {
-                        bad.push(format!("{}:{}: {ts}", path.display(), line_num + 1));
-                    }
+    for path in collect_jsonl_logs(e2e_dir) {
+        let content = fs::read_to_string(&path).unwrap();
+        for (line_num, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(json) = serde_json::from_str::<Value>(line)
+                && let Some(ts) = json["ts"].as_str()
+            {
+                checked += 1;
+                if chrono::DateTime::parse_from_rfc3339(ts).is_err() {
+                    bad.push(format!("{}:{}: {ts}", path.display(), line_num + 1));
                 }
             }
         }
@@ -280,6 +306,7 @@ fn jsonl_timestamps_are_rfc3339() {
 #[test]
 fn jsonl_run_ids_consistent_within_file() {
     let tracker = tracker_for("jsonl_run_ids_consistent_within_file");
+    let _trace_guard = tracker.trace_env_guard();
 
     let e2e_dir = Path::new("test-results/e2e");
     if !e2e_dir.exists() {
@@ -290,31 +317,28 @@ fn jsonl_run_ids_consistent_within_file() {
     let phase_start = tracker.start("check_run_ids", Some("Check run_id consistency"));
     let mut errors = Vec::new();
 
-    for entry in fs::read_dir(e2e_dir).unwrap().filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "jsonl") {
-            let content = fs::read_to_string(&path).unwrap();
-            let mut run_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for path in collect_jsonl_logs(e2e_dir) {
+        let content = fs::read_to_string(&path).unwrap();
+        let mut run_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-            for line in content.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(json) = serde_json::from_str::<Value>(line)
-                    && let Some(run_id) = json["run_id"].as_str()
-                {
-                    run_ids.insert(run_id.to_string());
-                }
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                continue;
             }
+            if let Ok(json) = serde_json::from_str::<Value>(line)
+                && let Some(run_id) = json["run_id"].as_str()
+            {
+                run_ids.insert(run_id.to_string());
+            }
+        }
 
-            // A single file should have at most one run_id (one run per file)
-            if run_ids.len() > 1 {
-                errors.push(format!(
-                    "{}: Multiple run_ids found: {:?}",
-                    path.display(),
-                    run_ids
-                ));
-            }
+        // A single file should have at most one run_id (one run per file)
+        if run_ids.len() > 1 {
+            errors.push(format!(
+                "{}: Multiple run_ids found: {:?}",
+                path.display(),
+                run_ids
+            ));
         }
     }
     tracker.end(

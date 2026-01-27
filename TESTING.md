@@ -363,6 +363,9 @@ All E2E test infrastructure emits structured JSONL logs following a unified sche
 - `cass.log` - Structured JSONL events (SCHEMA.md)
 - `trace.jsonl` - CLI trace spans (command, args, timestamps, exit_code, trace_id)
 
+Rust E2E tests set `CASS_TRACE_FILE` + `CASS_TRACE_ID` per test to ensure trace spans
+are correlated with the same `trace_id` recorded in `cass.log`.
+
 ### Rust E2E Logger
 
 ```rust

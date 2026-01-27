@@ -6,14 +6,19 @@ Generated: 2026-01-27 (post vhl0 real-model refactor)
 
 This audit catalogs remaining mock/fake/stub patterns in the cass codebase.
 
-**Status:** ✅ Mock implementations removed from search/embedder/reranker/daemon tests.
+**Status:** ⚠️ One naming-based violation remains in an e2e test harness.
 
-**Current allowlist:** 2 entries (true fixture boundaries only)
-- Deterministic fixture constructors: 2 entries (`mock_system_info`, `mock_resources`)
+**Current allowlist:** 2 entries (deterministic fixture constructors)
+- `mock_system_info`
+- `mock_resources`
 
-**Matches found:** 29 (all in `src/sources/install.rs`)
+**Matches found:** 36 total
+- 29 matches in `src/sources/install.rs` (fixture constructors)
+- 7 matches in `tests/e2e_ssh_sources.rs` (`fake_bin` / `fake_rsync` naming)
 
-**CI validation:** `./scripts/validate_ci.sh --no-mock-only` should pass with the updated allowlist.
+**CI validation:** `./scripts/validate_ci.sh --no-mock-only` currently fails due to
+`tests/e2e_ssh_sources.rs` naming. Pending rename to `fixture_*` once file
+reservation is cleared.
 
 ## Classification Categories
 
@@ -44,8 +49,17 @@ integration tests.
 
 ## Test Files (`tests/`)
 
-No remaining mock/fake/stub patterns in tests outside of fixture directories
-and documentation comments.
+### 2. `tests/e2e_ssh_sources.rs`
+
+**Classification: (b) CONVERT TO FIXTURE (naming)**
+
+Patterns:
+- `fake_bin`
+- `fake_rsync`
+
+**Strategy:** Rename to `fixture_bin` / `fixture_rsync` to avoid false-positive
+no-mock violations while keeping the same behavior (simulating missing rsync
+binary to force SFTP fallback). Awaiting file reservation clearance.
 
 ---
 
