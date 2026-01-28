@@ -1529,9 +1529,22 @@ pre:hover .copy-code-btn { opacity: 1; }
 @media print {
   body::before { display: none; }
   .toolbar, .floating-nav, .scroll-progress { display: none !important; }
-  .message { break-inside: avoid; }
+  .message {
+    background: white;
+    backdrop-filter: none;
+    box-shadow: none;
+    border: 1px solid #ccc;
+    break-inside: avoid;
+  }
   .message-link { display: none; }
   .copy-code-btn { display: none; }
+  .tool-popover { display: none !important; }
+  .tool-badge {
+    border: 1px solid #666;
+    background: #f5f5f5;
+    color: #333;
+  }
+  .tool-badge-icon { color: #666; }
 }
 "#;
 
