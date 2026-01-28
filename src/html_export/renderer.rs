@@ -600,6 +600,363 @@ pub fn render_conversation(
     Ok(html)
 }
 
+// ============================================================================
+// MessageGroup Rendering (Consolidated Tool Calls)
+// ============================================================================
+
+/// Maximum number of tool badges to show before overflow indicator.
+const MAX_VISIBLE_BADGES: usize = 6;
+
+/// Render a list of message groups to HTML (consolidated rendering).
+///
+/// This is the preferred rendering method when messages have been grouped
+/// via `group_messages_for_export()`. Each group renders as a single article
+/// with all associated tool calls shown as compact badges.
+pub fn render_message_groups(
+    groups: &[MessageGroup],
+    options: &RenderOptions,
+) -> Result<String, RenderError> {
+    let started = Instant::now();
+    let mut html = String::with_capacity(groups.len() * 3000);
+
+    // Add agent-specific class to conversation wrapper if specified
+    let agent_class = options
+        .agent_slug
+        .as_ref()
+        .map(|s| agent_css_class(s))
+        .unwrap_or("");
+
+    info!(
+        component = "renderer",
+        operation = "render_message_groups",
+        group_count = groups.len(),
+        agent_slug = options.agent_slug.as_deref().unwrap_or(""),
+        "Rendering conversation from message groups"
+    );
+
+    if !agent_class.is_empty() {
+        html.push_str(&format!(
+            r#"<div class="conversation-messages {}">"#,
+            agent_class
+        ));
+        html.push('\n');
+    }
+
+    for (idx, group) in groups.iter().enumerate() {
+        html.push_str(&render_message_group(group, idx, options)?);
+        html.push('\n');
+    }
+
+    if !agent_class.is_empty() {
+        html.push_str("</div>\n");
+    }
+
+    debug!(
+        component = "renderer",
+        operation = "render_message_groups_complete",
+        duration_ms = started.elapsed().as_millis(),
+        bytes = html.len(),
+        groups = groups.len(),
+        "Message groups rendered"
+    );
+
+    Ok(html)
+}
+
+/// Render a single message group to HTML.
+///
+/// A message group consists of:
+/// - A primary message (user/assistant/system)
+/// - Zero or more associated tool calls with their results
+///
+/// The output is a single `<article>` element with tool badges in the header.
+fn render_message_group(
+    group: &MessageGroup,
+    index: usize,
+    options: &RenderOptions,
+) -> Result<String, RenderError> {
+    let started = Instant::now();
+    trace!(
+        component = "renderer",
+        operation = "render_message_group",
+        index = index,
+        group_type = ?group.group_type,
+        tool_count = group.tool_count(),
+        "Rendering message group"
+    );
+
+    // Role class based on group type
+    let role_class = match group.group_type {
+        MessageGroupType::User => "message-user",
+        MessageGroupType::Assistant => "message-assistant",
+        MessageGroupType::System => "message-system",
+        MessageGroupType::ToolOnly => "message-tool",
+    };
+
+    // Role icon
+    let role_icon = match group.group_type {
+        MessageGroupType::User => ICON_USER,
+        MessageGroupType::Assistant => ICON_BOT,
+        MessageGroupType::System => ICON_SETTINGS,
+        MessageGroupType::ToolOnly => ICON_WRENCH,
+    };
+
+    // Author display
+    let author_display = group
+        .primary
+        .author
+        .as_ref()
+        .map(|a| super::template::html_escape(a))
+        .unwrap_or_else(|| match group.group_type {
+            MessageGroupType::User => "You".to_string(),
+            MessageGroupType::Assistant => "Assistant".to_string(),
+            MessageGroupType::System => "System".to_string(),
+            MessageGroupType::ToolOnly => "Tool".to_string(),
+        });
+
+    // Message anchor
+    let anchor_id = group
+        .primary
+        .index
+        .or(Some(index))
+        .map(|idx| format!(r#" id="msg-{}""#, idx))
+        .unwrap_or_default();
+
+    // Timestamp
+    let timestamp_html = if options.show_timestamps {
+        if let Some(ts) = &group.start_timestamp {
+            format!(
+                r#"<time class="message-time" datetime="{}">{}</time>"#,
+                super::template::html_escape(ts),
+                super::template::html_escape(&format_timestamp(ts))
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // Render content
+    let content_html = render_content(&group.primary.content, options);
+
+    // Render tool badges with overflow handling
+    let (tool_badges_html, overflow_count) = if options.show_tool_calls && !group.tool_calls.is_empty() {
+        render_tool_badges_with_overflow(&group.tool_calls, options)
+    } else {
+        (String::new(), 0)
+    };
+
+    // ARIA label for the article
+    let aria_label = if group.tool_calls.is_empty() {
+        format!("{} message", group.group_type.role_icon())
+    } else {
+        format!(
+            "{} message with {} tool call{}",
+            group.group_type.role_icon(),
+            group.tool_calls.len(),
+            if group.tool_calls.len() == 1 { "" } else { "s" }
+        )
+    };
+
+    // Check for content collapse
+    let (content_wrapper_start, content_wrapper_end) =
+        if options.collapse_threshold > 0 && group.primary.content.len() > options.collapse_threshold {
+            let preview_len = options.collapse_threshold.min(500);
+            let safe_len = truncate_to_char_boundary(&group.primary.content, preview_len);
+            let preview = &group.primary.content[..safe_len];
+            (
+                format!(
+                    r#"<details class="message-collapse">
+                    <summary>
+                        <span class="message-preview">{}</span>
+                        <span class="message-expand-hint">Click to expand ({} chars)</span>
+                    </summary>
+                    <div class="message-expanded">"#,
+                    super::template::html_escape(preview),
+                    group.primary.content.len()
+                ),
+                "</div></details>".to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+    // Only render content div if there's actual content
+    let content_section = if content_html.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"
+                <div class="message-content">
+                    {wrapper_start}{content}{wrapper_end}
+                </div>"#,
+            wrapper_start = content_wrapper_start,
+            content = content_html,
+            wrapper_end = content_wrapper_end,
+        )
+    };
+
+    // Tool badges container with accessibility
+    let tool_container = if !tool_badges_html.is_empty() {
+        format!(
+            r#"<div class="message-header-right" role="group" aria-label="Tool calls{}">
+                        {badges}
+                    </div>"#,
+            if overflow_count > 0 {
+                format!(" ({} shown, {} more)", MAX_VISIBLE_BADGES, overflow_count)
+            } else {
+                String::new()
+            },
+            badges = tool_badges_html,
+        )
+    } else {
+        r#"<div class="message-header-right"></div>"#.to_string()
+    };
+
+    let rendered = format!(
+        r#"            <article class="message {role_class}"{anchor} role="article" aria-label="{aria_label}">
+                <header class="message-header">
+                    <div class="message-header-left">
+                        <span class="message-icon" aria-hidden="true">{role_icon}</span>
+                        <span class="message-author">{author}</span>
+                        {timestamp}
+                    </div>
+                    {tool_container}
+                </header>{content_section}
+            </article>"#,
+        role_class = role_class,
+        anchor = anchor_id,
+        aria_label = super::template::html_escape(&aria_label),
+        role_icon = role_icon,
+        author = author_display,
+        timestamp = timestamp_html,
+        tool_container = tool_container,
+        content_section = content_section,
+    );
+
+    debug!(
+        component = "renderer",
+        operation = "render_message_group_complete",
+        index = index,
+        duration_ms = started.elapsed().as_millis(),
+        bytes = rendered.len(),
+        "Message group rendered"
+    );
+
+    Ok(rendered)
+}
+
+/// Render tool badges with overflow handling.
+///
+/// When there are more than `MAX_VISIBLE_BADGES` tool calls, shows the first N
+/// badges plus a "+X more" overflow indicator.
+fn render_tool_badges_with_overflow(
+    tools: &[ToolCallWithResult],
+    _options: &RenderOptions,
+) -> (String, usize) {
+    if tools.is_empty() {
+        return (String::new(), 0);
+    }
+
+    if tools.len() <= MAX_VISIBLE_BADGES {
+        // Render all badges
+        let badges: String = tools
+            .iter()
+            .map(render_single_tool_badge)
+            .collect::<Vec<_>>()
+            .join("\n                        ");
+        (badges, 0)
+    } else {
+        // Render first N badges + overflow indicator
+        let visible: String = tools[..MAX_VISIBLE_BADGES]
+            .iter()
+            .map(render_single_tool_badge)
+            .collect::<Vec<_>>()
+            .join("\n                        ");
+
+        let overflow_count = tools.len() - MAX_VISIBLE_BADGES;
+        let overflow_badge = format!(
+            r#"<button class="tool-badge tool-overflow"
+                    aria-label="{count} more tool{s}"
+                    aria-expanded="false"
+                    data-overflow-count="{count}">
+                <span class="tool-badge-text">+{count}</span>
+            </button>"#,
+            count = overflow_count,
+            s = if overflow_count == 1 { "" } else { "s" },
+        );
+
+        (format!("{}\n                        {}", visible, overflow_badge), overflow_count)
+    }
+}
+
+/// Render a single tool badge as a button with Lucide SVG icon.
+fn render_single_tool_badge(tool: &ToolCallWithResult) -> String {
+    let icon = get_tool_lucide_icon(&tool.call.name);
+    let status = tool.effective_status();
+    let status_class = status.css_class();
+    let status_label = status.label();
+    let status_icon = status.icon_svg();
+
+    // Escape input for data attribute
+    let input_preview = if tool.call.input.len() > 200 {
+        let safe_len = truncate_to_char_boundary(&tool.call.input, 200);
+        format!("{}...", &tool.call.input[..safe_len])
+    } else {
+        tool.call.input.clone()
+    };
+
+    // Build output preview for popover
+    let output_preview = tool
+        .result
+        .as_ref()
+        .map(|r| {
+            if r.content.len() > 200 {
+                let safe_len = truncate_to_char_boundary(&r.content, 200);
+                format!("{}...", &r.content[..safe_len])
+            } else {
+                r.content.clone()
+            }
+        })
+        .unwrap_or_default();
+
+    format!(
+        r#"<button class="tool-badge {status_class}"
+                aria-label="{name}: {status_label}"
+                aria-expanded="false"
+                data-tool-name="{name}"
+                data-tool-input="{input}"
+                data-tool-output="{output}">
+            <span class="tool-badge-icon">{icon}</span>
+            <span class="tool-badge-name">{name}</span>
+            <span class="tool-badge-status">{status_icon}</span>
+        </button>"#,
+        status_class = status_class,
+        name = super::template::html_escape(&tool.call.name),
+        status_label = status_label,
+        icon = icon,
+        input = super::template::html_escape(&input_preview),
+        output = super::template::html_escape(&output_preview),
+        status_icon = status_icon,
+    )
+}
+
+/// Get the appropriate Lucide SVG icon for a tool by name.
+fn get_tool_lucide_icon(tool_name: &str) -> &'static str {
+    match tool_name.to_lowercase().as_str() {
+        "bash" | "shell" | "terminal" => ICON_TERMINAL,
+        "read" | "read_file" | "readfile" => ICON_FILE_TEXT,
+        "write" | "write_file" | "writefile" | "edit" => ICON_PENCIL,
+        "glob" | "find" | "grep" | "search" | "websearch" => ICON_SEARCH,
+        "webfetch" | "fetch" | "http" | "curl" => ICON_GLOBE,
+        "task" | "agent" => ICON_SPARKLES,
+        n if n.starts_with("mcp__mcp-agent-mail") => ICON_MAIL,
+        n if n.contains("sql") || n.contains("db") || n.contains("database") => ICON_DATABASE,
+        _ => ICON_WRENCH,
+    }
+}
+
 /// Render a single message to HTML.
 pub fn render_message(message: &Message, options: &RenderOptions) -> Result<String, RenderError> {
     let started = Instant::now();
@@ -1357,5 +1714,347 @@ mod tests {
         let formatted = format_timestamp(weird_ts);
         // Should not panic and should produce valid output
         assert!(!formatted.is_empty());
+    }
+
+    // ========================================================================
+    // MessageGroup Rendering Tests
+    // ========================================================================
+
+    fn test_tool_call(name: &str) -> ToolCall {
+        ToolCall {
+            name: name.to_string(),
+            input: r#"{"test": "input"}"#.to_string(),
+            output: Some("test output".to_string()),
+            status: Some(ToolStatus::Success),
+        }
+    }
+
+    fn test_tool_call_with_result(name: &str, status: ToolStatus) -> ToolCallWithResult {
+        let call = test_tool_call(name);
+        let result = ToolResult::new(name, "test output", status);
+        ToolCallWithResult::new(call).with_result(result)
+    }
+
+    #[test]
+    fn test_render_message_group_user() {
+        let msg = test_message("user", "Hello, assistant!");
+        let group = MessageGroup::user(msg);
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("message-user"));
+        assert!(html.contains("Hello, assistant!"));
+        assert!(html.contains(r#"role="article""#));
+        assert!(html.contains("lucide-icon")); // Has role icon
+    }
+
+    #[test]
+    fn test_render_message_group_assistant_with_tools() {
+        let msg = test_message("assistant", "Let me read that file.");
+        let mut group = MessageGroup::assistant(msg);
+
+        // Add tool calls
+        group.add_tool_call(
+            test_tool_call("Read"),
+            Some("toolu_abc123".to_string()),
+        );
+        group.add_tool_result(
+            ToolResult::new("Read", "file contents here", ToolStatus::Success)
+                .with_correlation_id("toolu_abc123"),
+        );
+
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("message-assistant"));
+        assert!(html.contains("Let me read that file."));
+        assert!(html.contains("tool-badge")); // Has tool badge
+        assert!(html.contains("Read")); // Tool name in badge
+        assert!(html.contains(r#"role="group""#)); // Accessibility for tool container
+        assert!(html.contains("aria-label")); // Accessible
+    }
+
+    #[test]
+    fn test_render_message_group_multiple_tools() {
+        let msg = test_message("assistant", "I'll run several commands.");
+        let mut group = MessageGroup::assistant(msg);
+
+        // Add multiple tool calls
+        let tools = ["Bash", "Read", "Write"];
+        for (i, name) in tools.iter().enumerate() {
+            group.add_tool_call(
+                test_tool_call(name),
+                Some(format!("toolu_{}", i)),
+            );
+        }
+
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        // Should have all tool badges
+        for tool_name in tools {
+            assert!(html.contains(tool_name), "Should contain badge for {}", tool_name);
+        }
+        assert!(html.contains("with 3 tool calls")); // Aria label mentions count
+    }
+
+    #[test]
+    fn test_render_tool_badges_overflow() {
+        // Create more tools than MAX_VISIBLE_BADGES
+        let tool_names = ["Read", "Write", "Bash", "Glob", "Grep", "WebFetch", "Task", "Search"];
+        let tools: Vec<ToolCallWithResult> = tool_names
+            .iter()
+            .map(|name| test_tool_call_with_result(name, ToolStatus::Success))
+            .collect();
+
+        let opts = RenderOptions::default();
+        let (html, overflow) = render_tool_badges_with_overflow(&tools, &opts);
+
+        // Should show MAX_VISIBLE_BADGES badges
+        assert!(overflow > 0, "Should have overflow");
+        assert_eq!(overflow, tools.len() - MAX_VISIBLE_BADGES);
+
+        // Should have overflow badge
+        assert!(html.contains("tool-overflow"));
+        assert!(html.contains(&format!("+{}", overflow)));
+    }
+
+    #[test]
+    fn test_render_tool_badges_no_overflow() {
+        let tools: Vec<ToolCallWithResult> = ["Read", "Write", "Bash"]
+            .iter()
+            .map(|name| test_tool_call_with_result(name, ToolStatus::Success))
+            .collect();
+
+        let opts = RenderOptions::default();
+        let (html, overflow) = render_tool_badges_with_overflow(&tools, &opts);
+
+        assert_eq!(overflow, 0);
+        assert!(!html.contains("tool-overflow"));
+        assert!(html.contains("Read"));
+        assert!(html.contains("Write"));
+        assert!(html.contains("Bash"));
+    }
+
+    #[test]
+    fn test_render_single_tool_badge_success() {
+        let tool = test_tool_call_with_result("Bash", ToolStatus::Success);
+        let html = render_single_tool_badge(&tool);
+
+        assert!(html.contains("tool-badge"));
+        assert!(html.contains("tool-status-success"));
+        assert!(html.contains("Bash"));
+        assert!(html.contains(r#"aria-label="Bash: success""#));
+        assert!(html.contains("lucide-icon")); // Has SVG icon
+    }
+
+    #[test]
+    fn test_render_single_tool_badge_error() {
+        let tool = test_tool_call_with_result("Bash", ToolStatus::Error);
+        let html = render_single_tool_badge(&tool);
+
+        assert!(html.contains("tool-status-error"));
+        assert!(html.contains(r#"aria-label="Bash: error""#));
+    }
+
+    #[test]
+    fn test_render_single_tool_badge_with_data_attributes() {
+        let tool = test_tool_call_with_result("Read", ToolStatus::Success);
+        let html = render_single_tool_badge(&tool);
+
+        assert!(html.contains(r#"data-tool-name="Read""#));
+        assert!(html.contains("data-tool-input="));
+        assert!(html.contains("data-tool-output="));
+    }
+
+    #[test]
+    fn test_get_tool_lucide_icon() {
+        // Check icon mappings
+        assert!(get_tool_lucide_icon("Bash").contains("polyline")); // Terminal
+        assert!(get_tool_lucide_icon("Read").contains("M15 2H6")); // FileText
+        assert!(get_tool_lucide_icon("Write").contains("M21.174")); // Pencil
+        assert!(get_tool_lucide_icon("Glob").contains("circle cx=\"11\"")); // Search
+        assert!(get_tool_lucide_icon("WebFetch").contains("circle cx=\"12\" cy=\"12\" r=\"10\"")); // Globe
+        assert!(get_tool_lucide_icon("mcp__mcp-agent-mail__send").contains("rect width=\"20\"")); // Mail
+        assert!(get_tool_lucide_icon("unknown_tool").contains("path d=\"M14.7 6.3")); // Wrench fallback
+    }
+
+    #[test]
+    fn test_render_message_groups_empty() {
+        let groups: Vec<MessageGroup> = vec![];
+        let opts = RenderOptions::default();
+        let html = render_message_groups(&groups, &opts).unwrap();
+
+        // Should just have the wrapper if agent class is set
+        assert!(html.is_empty() || html.contains("conversation-messages") == false);
+    }
+
+    #[test]
+    fn test_render_message_groups_with_agent_class() {
+        let groups = vec![
+            MessageGroup::user(test_message("user", "Hello")),
+            MessageGroup::assistant(test_message("assistant", "Hi there")),
+        ];
+        let opts = RenderOptions {
+            agent_slug: Some("claude_code".to_string()),
+            ..Default::default()
+        };
+        let html = render_message_groups(&groups, &opts).unwrap();
+
+        assert!(html.contains("agent-claude"));
+        assert!(html.contains("conversation-messages"));
+        assert!(html.contains("message-user"));
+        assert!(html.contains("message-assistant"));
+    }
+
+    #[test]
+    fn test_render_message_group_system() {
+        let msg = test_message("system", "You are a helpful assistant.");
+        let group = MessageGroup::system(msg);
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("message-system"));
+        assert!(html.contains("System")); // Author display
+        assert!(html.contains("You are a helpful assistant."));
+    }
+
+    #[test]
+    fn test_render_message_group_tool_only() {
+        let msg = test_message("tool", "Tool result content");
+        let group = MessageGroup::tool_only(msg);
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("message-tool"));
+    }
+
+    #[test]
+    fn test_render_message_group_with_timestamp() {
+        let mut msg = test_message("user", "Test message");
+        msg.timestamp = Some("2026-01-25T14:30:00Z".to_string());
+        let group = MessageGroup::user(msg);
+
+        let opts = RenderOptions {
+            show_timestamps: true,
+            ..Default::default()
+        };
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("<time"));
+        assert!(html.contains("datetime="));
+        assert!(html.contains("2026-01-25"));
+    }
+
+    #[test]
+    fn test_render_message_group_without_timestamps() {
+        let mut msg = test_message("user", "Test message");
+        msg.timestamp = Some("2026-01-25T14:30:00Z".to_string());
+        let group = MessageGroup::user(msg);
+
+        let opts = RenderOptions {
+            show_timestamps: false,
+            ..Default::default()
+        };
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(!html.contains("<time"));
+    }
+
+    #[test]
+    fn test_render_message_group_tool_badges_hidden_when_disabled() {
+        let msg = test_message("assistant", "Let me check that file.");
+        let mut group = MessageGroup::assistant(msg);
+        group.add_tool_call(test_tool_call("Read"), None);
+
+        let opts = RenderOptions {
+            show_tool_calls: false,
+            ..Default::default()
+        };
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(!html.contains("tool-badge"));
+    }
+
+    #[test]
+    fn test_render_message_group_with_collapse() {
+        let long_content = "x".repeat(2000);
+        let msg = test_message("user", &long_content);
+        let group = MessageGroup::user(msg);
+
+        let opts = RenderOptions {
+            collapse_threshold: 1000,
+            ..Default::default()
+        };
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains("<details"));
+        assert!(html.contains("message-collapse"));
+        assert!(html.contains("Click to expand"));
+    }
+
+    #[test]
+    fn test_render_message_group_anchors() {
+        let mut msg = test_message("user", "Test message");
+        msg.index = Some(42);
+        let group = MessageGroup::user(msg);
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 0, &opts).unwrap();
+
+        assert!(html.contains(r#"id="msg-42""#));
+    }
+
+    #[test]
+    fn test_render_message_group_uses_fallback_index() {
+        // No message index, should use the group index
+        let msg = test_message("user", "Test message");
+        let group = MessageGroup::user(msg);
+        let opts = RenderOptions::default();
+        let html = render_message_group(&group, 5, &opts).unwrap();
+
+        assert!(html.contains(r#"id="msg-5""#));
+    }
+
+    #[test]
+    fn test_tool_badge_truncates_long_input() {
+        let long_input = r#"{"command": ""#.to_owned() + &"x".repeat(500) + r#""}"#;
+        let mut call = test_tool_call("Bash");
+        call.input = long_input;
+        let tool = ToolCallWithResult::new(call);
+        let html = render_single_tool_badge(&tool);
+
+        // Should contain truncated input with ellipsis
+        assert!(html.contains("..."));
+    }
+
+    #[test]
+    fn test_tool_badge_accessibility() {
+        let tool = test_tool_call_with_result("Read", ToolStatus::Success);
+        let html = render_single_tool_badge(&tool);
+
+        // Must be a button (keyboard accessible)
+        assert!(html.contains("<button"));
+        assert!(html.contains("</button>"));
+        // Must have aria-label
+        assert!(html.contains("aria-label="));
+        // Must have aria-expanded for popover
+        assert!(html.contains("aria-expanded="));
+    }
+
+    #[test]
+    fn test_render_message_groups_all_roles() {
+        let groups = vec![
+            MessageGroup::user(test_message("user", "User message")),
+            MessageGroup::assistant(test_message("assistant", "Assistant response")),
+            MessageGroup::system(test_message("system", "System context")),
+            MessageGroup::tool_only(test_message("tool", "Tool result")),
+        ];
+        let opts = RenderOptions::default();
+        let html = render_message_groups(&groups, &opts).unwrap();
+
+        assert!(html.contains("message-user"));
+        assert!(html.contains("message-assistant"));
+        assert!(html.contains("message-system"));
+        assert!(html.contains("message-tool"));
     }
 }
