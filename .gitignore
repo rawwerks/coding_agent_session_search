@@ -76,3 +76,6 @@ Chrome_*.png
 # HTML export drafts
 world_class_export.html
 claude_*.html
+session_export_test.html
+tests/fixtures/search_demo_data/*.db-shm
+tests/fixtures/search_demo_data/*.db-wal

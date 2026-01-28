@@ -29,7 +29,8 @@ use crate::storage::sqlite::SqliteStorage;
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 /// Type alias for batch classification map: (ConnectorKind, Path) -> (ScanRoot, MinTS, MaxTS)
-type BatchClassificationMap = HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>, Option<i64>)>;
+type BatchClassificationMap =
+    HashMap<(ConnectorKind, PathBuf), (ScanRoot, Option<i64>, Option<i64>)>;
 
 #[derive(Debug, Clone)]
 pub enum ReindexCommand {

@@ -382,7 +382,7 @@ fn test_wizard_with_real_fixture_database() {
     );
 
     // Create wizard state pointing to real fixture database
-    let state = WizardState {
+    let _state = WizardState {
         db_path: db_path.clone(),
         ..WizardState::default()
     };
