@@ -421,8 +421,17 @@ pub fn run_setup(opts: &SetupOptions) -> Result<SetupResult, SetupError> {
                     "ℹ".blue(),
                     total_merged
                 );
-                for (kept, aliases) in &merged_aliases {
-                    println!("│   {} ← {}", kept.bold(), aliases.join(", ").dimmed());
+                // Sort for deterministic output
+                let mut sorted_merges: Vec<_> = merged_aliases.iter().collect();
+                sorted_merges.sort_by_key(|(k, _)| *k);
+                for (kept, aliases) in sorted_merges {
+                    let mut sorted_aliases = aliases.clone();
+                    sorted_aliases.sort();
+                    println!(
+                        "│   {} ← {}",
+                        kept.bold(),
+                        sorted_aliases.join(", ").dimmed()
+                    );
                 }
             }
         }
