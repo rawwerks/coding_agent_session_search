@@ -4187,9 +4187,6 @@ fn run_cli_search(
             approximate = semantic_opts.approximate,
             "Semantic search options configured"
         );
-
-        // TODO(bd-2mbe): Wire model selection to embedder registry
-        // TODO(bd-1lps): Implement daemon client integration
     }
 
     // Track search timing breakdown (T7.4)
