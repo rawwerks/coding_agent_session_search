@@ -89,11 +89,7 @@ impl ResourceMonitor {
 
                 let errno = *libc::__errno_location();
                 if errno != 0 {
-                    warn!(
-                        nice = nice_value,
-                        errno = errno,
-                        "Failed to set nice value"
-                    );
+                    warn!(nice = nice_value, errno = errno, "Failed to set nice value");
                     return false;
                 }
 

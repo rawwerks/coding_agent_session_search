@@ -39,9 +39,9 @@ impl Embedder for MockEmbedder {
 
         // Create deterministic embedding based on text
         let mut embedding = vec![0.0f32; self.dimension];
-        let hash = text.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
         // Fill with pseudo-random but deterministic values
         for (i, v) in embedding.iter_mut().enumerate() {
@@ -100,8 +100,16 @@ impl QualityMockEmbedder {
 
         // Feature 2-10: keyword presence
         let keywords = [
-            "authentication", "jwt", "database", "error", "async",
-            "json", "logging", "cli", "http", "test"
+            "authentication",
+            "jwt",
+            "database",
+            "error",
+            "async",
+            "json",
+            "logging",
+            "cli",
+            "http",
+            "test",
         ];
         for (i, keyword) in keywords.iter().enumerate() {
             if i + 1 < self.dimension && text_lower.contains(keyword) {
@@ -110,9 +118,9 @@ impl QualityMockEmbedder {
         }
 
         // Fill rest with hash-based values
-        let hash = text.bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let hash = text
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         for i in 11..self.dimension {
             let seed = hash.wrapping_add(i as u64);
             features[i] = ((seed % 1000) as f32 / 1000.0) - 0.5;
@@ -167,7 +175,9 @@ fn test_harness_with_mock_embedder() {
         is_baseline: false,
     };
 
-    let report = harness.evaluate(&embedder, &corpus, &metadata).expect("evaluation should succeed");
+    let report = harness
+        .evaluate(&embedder, &corpus, &metadata)
+        .expect("evaluation should succeed");
 
     // Verify report structure
     assert_eq!(report.model_id, "mock-384");
@@ -196,10 +206,15 @@ fn test_harness_with_quality_embedder() {
         is_baseline: false,
     };
 
-    let report = harness.evaluate(&embedder, &corpus, &metadata).expect("evaluation should succeed");
+    let report = harness
+        .evaluate(&embedder, &corpus, &metadata)
+        .expect("evaluation should succeed");
 
     // Quality embedder should have reasonable NDCG
-    assert!(report.ndcg_at_10 > 0.0, "Quality embedder should have non-zero NDCG");
+    assert!(
+        report.ndcg_at_10 > 0.0,
+        "Quality embedder should have non-zero NDCG"
+    );
 }
 
 #[test]
@@ -231,11 +246,13 @@ fn test_harness_comparison() {
         is_baseline: false,
     };
 
-    let comparison = harness.run_comparison(
-        (&baseline_embedder, &baseline_metadata),
-        vec![(&candidate_embedder, &candidate_metadata)],
-        &corpus,
-    ).expect("comparison should succeed");
+    let comparison = harness
+        .run_comparison(
+            (&baseline_embedder, &baseline_metadata),
+            vec![(&candidate_embedder, &candidate_metadata)],
+            &corpus,
+        )
+        .expect("comparison should succeed");
 
     // Verify comparison structure
     assert_eq!(comparison.baseline.model_id, "baseline-384");
@@ -274,11 +291,13 @@ fn test_format_comparison_table() {
         is_baseline: false,
     };
 
-    let comparison = harness.run_comparison(
-        (&baseline_embedder, &baseline_metadata),
-        vec![(&candidate_embedder, &candidate_metadata)],
-        &corpus,
-    ).expect("comparison should succeed");
+    let comparison = harness
+        .run_comparison(
+            (&baseline_embedder, &baseline_metadata),
+            vec![(&candidate_embedder, &candidate_metadata)],
+            &corpus,
+        )
+        .expect("comparison should succeed");
 
     let table = format_comparison_table(&comparison);
 
@@ -313,7 +332,9 @@ fn test_custom_evaluation_config() {
         is_baseline: false,
     };
 
-    let report = harness.evaluate(&embedder, &corpus, &metadata).expect("should succeed");
+    let report = harness
+        .evaluate(&embedder, &corpus, &metadata)
+        .expect("should succeed");
     assert!(!report.corpus_hash.is_empty());
 }
 
@@ -365,6 +386,11 @@ fn test_ineligible_by_date() {
         is_baseline: false,
     };
 
-    let report = harness.evaluate(&embedder, &corpus, &metadata).expect("should succeed");
-    assert!(!report.eligible, "Model before cutoff should not be eligible");
+    let report = harness
+        .evaluate(&embedder, &corpus, &metadata)
+        .expect("should succeed");
+    assert!(
+        !report.eligible,
+        "Model before cutoff should not be eligible"
+    );
 }

@@ -17,7 +17,7 @@ use std::fmt;
 use std::time::Instant;
 
 use super::template::html_escape;
-use pulldown_cmark::{html, Options, Parser};
+use pulldown_cmark::{Options, Parser, html};
 use serde_json;
 use tracing::{debug, info, trace};
 
@@ -294,37 +294,36 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let content_html = render_content(&message.content, options);
 
     // Check if message should be collapsed
-    let (content_wrapper_start, content_wrapper_end) = if options.collapse_threshold > 0
-        && message.content.len() > options.collapse_threshold
-    {
-        debug!(
-            component = "renderer",
-            operation = "collapse_message",
-            message_index = message.index.unwrap_or(0),
-            content_len = message.content.len(),
-            collapse_threshold = options.collapse_threshold,
-            "Collapsing long message"
-        );
-        let preview_len = options.collapse_threshold.min(500);
-        // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
-        let safe_len = truncate_to_char_boundary(&message.content, preview_len);
-        let preview = &message.content[..safe_len];
-        (
-            format!(
-                r#"<details class="message-collapse">
+    let (content_wrapper_start, content_wrapper_end) =
+        if options.collapse_threshold > 0 && message.content.len() > options.collapse_threshold {
+            debug!(
+                component = "renderer",
+                operation = "collapse_message",
+                message_index = message.index.unwrap_or(0),
+                content_len = message.content.len(),
+                collapse_threshold = options.collapse_threshold,
+                "Collapsing long message"
+            );
+            let preview_len = options.collapse_threshold.min(500);
+            // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
+            let safe_len = truncate_to_char_boundary(&message.content, preview_len);
+            let preview = &message.content[..safe_len];
+            (
+                format!(
+                    r#"<details class="message-collapse">
                     <summary>
                         <span class="message-preview">{}</span>
                         <span class="message-expand-hint">Click to expand ({} chars)</span>
                     </summary>
                     <div class="message-expanded">"#,
-                html_escape(preview),
-                message.content.len()
-            ),
-            "</div></details>".to_string(),
-        )
-    } else {
-        (String::new(), String::new())
-    };
+                    html_escape(preview),
+                    message.content.len()
+                ),
+                "</div></details>".to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
 
     let tool_call_html = if options.show_tool_calls {
         if let Some(tc) = &message.tool_call {

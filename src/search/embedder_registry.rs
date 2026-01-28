@@ -323,7 +323,10 @@ impl EmbedderRegistry {
 
     /// Get all bake-off eligible embedders.
     pub fn bakeoff_eligible(&self) -> Vec<&'static RegisteredEmbedder> {
-        EMBEDDERS.iter().filter(|e| e.is_bakeoff_eligible()).collect()
+        EMBEDDERS
+            .iter()
+            .filter(|e| e.is_bakeoff_eligible())
+            .collect()
     }
 
     /// Get available bake-off eligible embedders (model files present).
@@ -702,11 +705,7 @@ mod tests {
         for e in EMBEDDERS.iter() {
             if e.requires_model_files {
                 let dir = e.model_dir(tmp.path());
-                assert!(
-                    dir.is_some(),
-                    "{} should have a model directory",
-                    e.name
-                );
+                assert!(dir.is_some(), "{} should have a model directory", e.name);
                 let dir = dir.unwrap();
                 assert!(
                     dir.starts_with(tmp.path().join("models")),

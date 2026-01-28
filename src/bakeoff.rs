@@ -339,46 +339,85 @@ impl EvaluationCorpus {
         // Add sample documents representing code snippets and discussions
         corpus.add_document("d1", "implementing authentication with jwt tokens in rust using jsonwebtoken crate for secure api access");
         corpus.add_document("d2", "database connection pool configuration using sqlx with postgres for high performance queries");
-        corpus.add_document("d3", "error handling patterns in rust using thiserror and anyhow for better error messages");
-        corpus.add_document("d4", "async runtime setup with tokio for concurrent task processing and io operations");
-        corpus.add_document("d5", "parsing json data with serde for serialization and deserialization of structs");
-        corpus.add_document("d6", "logging configuration using tracing crate for structured observability and debugging");
-        corpus.add_document("d7", "cli argument parsing with clap for building command line applications");
-        corpus.add_document("d8", "http client requests using reqwest for making api calls to external services");
-        corpus.add_document("d9", "unit testing patterns with cargo test and mock objects for reliable tests");
-        corpus.add_document("d10", "file system operations reading and writing files with std fs module");
+        corpus.add_document(
+            "d3",
+            "error handling patterns in rust using thiserror and anyhow for better error messages",
+        );
+        corpus.add_document(
+            "d4",
+            "async runtime setup with tokio for concurrent task processing and io operations",
+        );
+        corpus.add_document(
+            "d5",
+            "parsing json data with serde for serialization and deserialization of structs",
+        );
+        corpus.add_document(
+            "d6",
+            "logging configuration using tracing crate for structured observability and debugging",
+        );
+        corpus.add_document(
+            "d7",
+            "cli argument parsing with clap for building command line applications",
+        );
+        corpus.add_document(
+            "d8",
+            "http client requests using reqwest for making api calls to external services",
+        );
+        corpus.add_document(
+            "d9",
+            "unit testing patterns with cargo test and mock objects for reliable tests",
+        );
+        corpus.add_document(
+            "d10",
+            "file system operations reading and writing files with std fs module",
+        );
 
         // Add queries with ground truth relevance judgments
         // Relevance: 0=not relevant, 1=somewhat, 2=highly, 3=perfect match
-        corpus.add_query("how to authenticate users with jwt", vec![
-            ("d1", 3.0),  // Perfect match
-            ("d2", 0.0),  // Not relevant
-            ("d8", 1.0),  // Somewhat (might involve API auth)
-        ]);
+        corpus.add_query(
+            "how to authenticate users with jwt",
+            vec![
+                ("d1", 3.0), // Perfect match
+                ("d2", 0.0), // Not relevant
+                ("d8", 1.0), // Somewhat (might involve API auth)
+            ],
+        );
 
-        corpus.add_query("database connection setup", vec![
-            ("d2", 3.0),  // Perfect match
-            ("d4", 1.0),  // Async might be related
-            ("d10", 0.0), // Not relevant
-        ]);
+        corpus.add_query(
+            "database connection setup",
+            vec![
+                ("d2", 3.0),  // Perfect match
+                ("d4", 1.0),  // Async might be related
+                ("d10", 0.0), // Not relevant
+            ],
+        );
 
-        corpus.add_query("error handling best practices", vec![
-            ("d3", 3.0),  // Perfect match
-            ("d6", 1.0),  // Logging errors
-            ("d9", 1.0),  // Testing error cases
-        ]);
+        corpus.add_query(
+            "error handling best practices",
+            vec![
+                ("d3", 3.0), // Perfect match
+                ("d6", 1.0), // Logging errors
+                ("d9", 1.0), // Testing error cases
+            ],
+        );
 
-        corpus.add_query("async programming tokio", vec![
-            ("d4", 3.0),  // Perfect match
-            ("d2", 1.0),  // Async DB queries
-            ("d8", 2.0),  // Async HTTP
-        ]);
+        corpus.add_query(
+            "async programming tokio",
+            vec![
+                ("d4", 3.0), // Perfect match
+                ("d2", 1.0), // Async DB queries
+                ("d8", 2.0), // Async HTTP
+            ],
+        );
 
-        corpus.add_query("json serialization", vec![
-            ("d5", 3.0),  // Perfect match
-            ("d8", 1.0),  // API often uses JSON
-            ("d1", 1.0),  // JWT is JSON-based
-        ]);
+        corpus.add_query(
+            "json serialization",
+            vec![
+                ("d5", 3.0), // Perfect match
+                ("d8", 1.0), // API often uses JSON
+                ("d1", 1.0), // JWT is JSON-based
+            ],
+        );
 
         corpus
     }
@@ -504,9 +543,11 @@ impl EvaluationHarness {
                     .map_err(|e| e.to_string())?;
                 query_latencies.push(start.elapsed());
             }
-            let avg_latency =
-                query_latencies.iter().map(|d| d.as_millis() as u64).sum::<u64>()
-                    / query_latencies.len() as u64;
+            let avg_latency = query_latencies
+                .iter()
+                .map(|d| d.as_millis() as u64)
+                .sum::<u64>()
+                / query_latencies.len() as u64;
             latencies.push(Duration::from_millis(avg_latency));
 
             // Rank documents by similarity

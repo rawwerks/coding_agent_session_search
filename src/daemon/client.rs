@@ -8,15 +8,15 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
 use super::protocol::{
-    ErrorCode, FramedMessage, HealthStatus, Request, Response, PROTOCOL_VERSION, decode_message,
+    ErrorCode, FramedMessage, HealthStatus, PROTOCOL_VERSION, Request, Response, decode_message,
     default_socket_path, encode_message,
 };
 use crate::search::daemon_client::{DaemonClient, DaemonError};
@@ -231,12 +231,14 @@ impl UdsDaemonClient {
 
     /// Send a request and receive a response.
     fn send_request(&self, request: Request) -> Result<Response, DaemonError> {
-        let request_id = format!("cass-{}", self.request_counter.fetch_add(1, Ordering::Relaxed));
+        let request_id = format!(
+            "cass-{}",
+            self.request_counter.fetch_add(1, Ordering::Relaxed)
+        );
         let msg = FramedMessage::new(&request_id, request);
 
-        let encoded = encode_message(&msg).map_err(|e| {
-            DaemonError::Failed(format!("failed to encode request: {}", e))
-        })?;
+        let encoded = encode_message(&msg)
+            .map_err(|e| DaemonError::Failed(format!("failed to encode request: {}", e)))?;
 
         let mut stream = self.get_connection()?;
 
@@ -278,9 +280,8 @@ impl UdsDaemonClient {
         })?;
 
         // Decode response
-        let response: FramedMessage<Response> = decode_message(&payload).map_err(|e| {
-            DaemonError::Failed(format!("failed to decode response: {}", e))
-        })?;
+        let response: FramedMessage<Response> = decode_message(&payload)
+            .map_err(|e| DaemonError::Failed(format!("failed to decode response: {}", e)))?;
 
         // Check version compatibility
         if response.version != PROTOCOL_VERSION {
@@ -367,7 +368,11 @@ impl DaemonClient for UdsDaemonClient {
     }
 
     fn embed(&self, text: &str, request_id: &str) -> Result<Vec<f32>, DaemonError> {
-        debug!(request_id = request_id, text_len = text.len(), "Daemon embed request");
+        debug!(
+            request_id = request_id,
+            text_len = text.len(),
+            "Daemon embed request"
+        );
 
         let response = self.send_request(Request::Embed {
             texts: vec![text.to_string()],

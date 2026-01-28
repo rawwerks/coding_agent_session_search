@@ -654,8 +654,6 @@ fn test_wizard_state_with_fixture_export_flow() {
         .expect("Export should succeed");
 
     // Verify export results
-    assert!(stats.conversations_processed >= 0);
-
     if stats.conversations_processed > 0 {
         let conn = Connection::open(&output_db).unwrap();
 

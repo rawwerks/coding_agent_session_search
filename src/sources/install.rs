@@ -1301,7 +1301,9 @@ mod tests {
         let home = std::env::var("HOME")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().into_owned()))
+            .or_else(|| {
+                directories::BaseDirs::new().map(|d| d.home_dir().to_string_lossy().into_owned())
+            })
             .unwrap_or_default();
 
         SystemInfo {

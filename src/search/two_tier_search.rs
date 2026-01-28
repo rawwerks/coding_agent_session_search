@@ -335,11 +335,7 @@ impl TwoTierIndex {
     }
 
     /// Search using fast embeddings only.
-    pub fn search_fast(
-        &self,
-        query_vec: &[f32],
-        k: usize,
-    ) -> Vec<ScoredResult> {
+    pub fn search_fast(&self, query_vec: &[f32], k: usize) -> Vec<ScoredResult> {
         if self.is_empty() || k == 0 {
             return Vec::new();
         }
@@ -368,11 +364,7 @@ impl TwoTierIndex {
     }
 
     /// Search using quality embeddings only.
-    pub fn search_quality(
-        &self,
-        query_vec: &[f32],
-        k: usize,
-    ) -> Vec<ScoredResult> {
+    pub fn search_quality(&self, query_vec: &[f32], k: usize) -> Vec<ScoredResult> {
         if self.is_empty() || k == 0 {
             return Vec::new();
         }
@@ -401,11 +393,7 @@ impl TwoTierIndex {
     }
 
     /// Get quality scores for a set of document indices.
-    pub fn quality_scores_for_indices(
-        &self,
-        query_vec: &[f32],
-        indices: &[usize],
-    ) -> Vec<f32> {
+    pub fn quality_scores_for_indices(&self, query_vec: &[f32], indices: &[usize]) -> Vec<f32> {
         let dim = query_vec.len();
         indices
             .iter()
@@ -524,18 +512,27 @@ impl<'a, D: DaemonClient> TwoTierSearcher<'a, D> {
     }
 
     /// Perform quality-only search (wait for daemon).
-    pub fn search_quality_only(&self, query: &str, k: usize) -> Result<Vec<ScoredResult>, TwoTierError> {
+    pub fn search_quality_only(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<ScoredResult>, TwoTierError> {
         let start = Instant::now();
 
-        let daemon = self.daemon.as_ref()
+        let daemon = self
+            .daemon
+            .as_ref()
             .ok_or_else(|| TwoTierError::DaemonUnavailable("no daemon configured".into()))?;
 
         if !daemon.is_available() {
-            return Err(TwoTierError::DaemonUnavailable("daemon not available".into()));
+            return Err(TwoTierError::DaemonUnavailable(
+                "daemon not available".into(),
+            ));
         }
 
         let request_id = format!("quality-{}", start.elapsed().as_nanos());
-        let query_vec = daemon.embed(query, &request_id)
+        let query_vec = daemon
+            .embed(query, &request_id)
             .map_err(TwoTierError::DaemonError)?;
 
         let results = self.index.search_quality(&query_vec, k);
@@ -592,7 +589,10 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                             self.phase = 2; // Skip refinement
                         }
 
-                        Some(SearchPhase::Initial { results, latency_ms })
+                        Some(SearchPhase::Initial {
+                            results,
+                            latency_ms,
+                        })
                     }
                     Err(e) => {
                         warn!(error = %e, "Fast embedding failed");
@@ -620,7 +620,8 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                 match daemon.embed(&self.query, &request_id) {
                     Ok(query_vec) => {
                         // Get candidate indices from fast results
-                        let candidates: Vec<usize> = self.fast_results
+                        let candidates: Vec<usize> = self
+                            .fast_results
                             .as_ref()
                             .map(|r| r.iter().map(|sr| sr.idx).collect())
                             .unwrap_or_default();
@@ -628,10 +629,10 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                         // If we have fast results, blend scores; otherwise full quality search
                         let results = if !candidates.is_empty() {
                             let fast_results = self.fast_results.as_ref().unwrap();
-                            let quality_scores = self.searcher.index.quality_scores_for_indices(
-                                &query_vec,
-                                &candidates,
-                            );
+                            let quality_scores = self
+                                .searcher
+                                .index
+                                .quality_scores_for_indices(&query_vec, &candidates);
 
                             // Blend scores
                             let weight = self.searcher.config.quality_weight;
@@ -656,13 +657,14 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                         };
 
                         let latency_ms = start.elapsed().as_millis() as u64;
-                        Some(SearchPhase::Refined { results, latency_ms })
-                    }
-                    Err(e) => {
-                        Some(SearchPhase::RefinementFailed {
-                            error: e.to_string(),
+                        Some(SearchPhase::Refined {
+                            results,
+                            latency_ms,
                         })
                     }
+                    Err(e) => Some(SearchPhase::RefinementFailed {
+                        error: e.to_string(),
+                    }),
                 }
             }
             _ => None,
@@ -778,7 +780,10 @@ mod tests {
 
         assert_eq!(index.len(), 10);
         assert!(!index.is_empty());
-        assert!(matches!(index.metadata.status, IndexStatus::Complete { .. }));
+        assert!(matches!(
+            index.metadata.status,
+            IndexStatus::Complete { .. }
+        ));
     }
 
     #[test]
@@ -826,7 +831,9 @@ mod tests {
         let entries = make_test_entries(100, config.fast_dimension, config.quality_dimension);
         let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
 
-        let query: Vec<f32> = (0..config.fast_dimension).map(|i| i as f32 * 0.01).collect();
+        let query: Vec<f32> = (0..config.fast_dimension)
+            .map(|i| i as f32 * 0.01)
+            .collect();
         let results = index.search_fast(&query, 10);
 
         assert_eq!(results.len(), 10);
@@ -842,7 +849,9 @@ mod tests {
         let entries = make_test_entries(100, config.fast_dimension, config.quality_dimension);
         let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
 
-        let query: Vec<f32> = (0..config.quality_dimension).map(|i| i as f32 * 0.01).collect();
+        let query: Vec<f32> = (0..config.quality_dimension)
+            .map(|i| i as f32 * 0.01)
+            .collect();
         let results = index.search_quality(&query, 10);
 
         assert_eq!(results.len(), 10);
@@ -962,7 +971,9 @@ mod tests {
         let entries = make_test_entries(10, config.fast_dimension, config.quality_dimension);
         let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
 
-        let query: Vec<f32> = (0..config.quality_dimension).map(|i| i as f32 * 0.01).collect();
+        let query: Vec<f32> = (0..config.quality_dimension)
+            .map(|i| i as f32 * 0.01)
+            .collect();
         let indices = vec![0, 2, 4];
         let scores = index.quality_scores_for_indices(&query, &indices);
 

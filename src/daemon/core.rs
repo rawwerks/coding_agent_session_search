@@ -6,8 +6,8 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -16,7 +16,7 @@ use tracing::{debug, error, info, warn};
 use super::models::ModelManager;
 use super::protocol::{
     EmbedResponse, ErrorCode, ErrorResponse, FramedMessage, HealthStatus, ModelInfo,
-    RerankResponse, Request, Response, StatusResponse, PROTOCOL_VERSION, decode_message,
+    PROTOCOL_VERSION, Request, RerankResponse, Response, StatusResponse, decode_message,
     default_socket_path, encode_message,
 };
 use super::resource::ResourceMonitor;
@@ -301,8 +301,8 @@ impl ModelDaemon {
             };
 
             // Send response
-            let encoded = encode_message(&response)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let encoded =
+                encode_message(&response).map_err(|e| std::io::Error::other(e.to_string()))?;
             stream.write_all(&encoded)?;
 
             // Check if this was a shutdown request
@@ -317,16 +317,18 @@ impl ModelDaemon {
         let start = Instant::now();
 
         match request {
-            Request::Health => {
-                Response::Health(HealthStatus {
-                    uptime_secs: self.uptime_secs(),
-                    version: PROTOCOL_VERSION,
-                    ready: self.models.is_ready(),
-                    memory_bytes: self.resources.memory_usage(),
-                })
-            }
+            Request::Health => Response::Health(HealthStatus {
+                uptime_secs: self.uptime_secs(),
+                version: PROTOCOL_VERSION,
+                ready: self.models.is_ready(),
+                memory_bytes: self.resources.memory_usage(),
+            }),
 
-            Request::Embed { texts, model, dims: _ } => {
+            Request::Embed {
+                texts,
+                model,
+                dims: _,
+            } => {
                 debug!(
                     request_id = %request_id,
                     batch_size = texts.len(),

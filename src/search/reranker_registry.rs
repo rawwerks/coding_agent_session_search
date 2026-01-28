@@ -559,11 +559,7 @@ mod tests {
         for r in RERANKERS.iter() {
             if r.requires_model_files {
                 let dir = r.model_dir(tmp.path());
-                assert!(
-                    dir.is_some(),
-                    "{} should have a model directory",
-                    r.name
-                );
+                assert!(dir.is_some(), "{} should have a model directory", r.name);
                 let dir = dir.unwrap();
                 assert!(
                     dir.starts_with(tmp.path().join("models")),

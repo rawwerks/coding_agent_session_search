@@ -51,5 +51,5 @@ pub mod resource;
 pub use client::{DaemonClientConfig, UdsDaemonClient};
 pub use core::{DaemonConfig, ModelDaemon};
 pub use models::ModelManager;
-pub use protocol::{Request, Response, PROTOCOL_VERSION, default_socket_path};
+pub use protocol::{PROTOCOL_VERSION, Request, Response, default_socket_path};
 pub use resource::ResourceMonitor;
