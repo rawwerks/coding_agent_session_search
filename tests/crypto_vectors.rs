@@ -1,5 +1,5 @@
 use coding_agent_search::encryption::{
-    Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_expand,
+    Argon2Params, aes_gcm_decrypt, aes_gcm_encrypt, argon2id_hash, hkdf_extract_expand,
 };
 use serde::Deserialize;
 
@@ -99,7 +99,7 @@ fn test_hkdf_vectors() {
         let ikm = hex::decode(v.ikm).unwrap();
         let salt = hex::decode(v.salt).unwrap();
         let info = hex::decode(v.info).unwrap();
-        let expected_okm = hex::decode(v.okm).unwrap();
+        let expected_okm = hex::decode(&v.expected_okm).unwrap();
 
         // This function performs both extract and expand
         let result = hkdf_extract_expand(&ikm, &salt, &info, v.output_len).unwrap();
