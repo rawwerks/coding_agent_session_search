@@ -75,3 +75,6 @@ Chrome_*.png
 
 # HTML export drafts
 world_class_export.html
+
+# Debug/reproduction scripts (ephemeral)
+reproduce_*.ts
