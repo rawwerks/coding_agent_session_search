@@ -57,6 +57,27 @@ const CORE_STYLES: &str = r#"
    Exact match to globals.css reference
    ============================================ */
 
+@font-face {
+  font-family: 'Space Grotesk';
+  src: local('Space Grotesk'), local('SpaceGrotesk');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: local('IBM Plex Sans'), local('IBMPlexSans');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: local('JetBrains Mono'), local('JetBrainsMono');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
 :root {
   --radius: 0.75rem;
 
@@ -190,7 +211,7 @@ html {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Space Grotesk', 'IBM Plex Sans', 'Manrope', sans-serif;
   font-size: var(--text-base);
   line-height: 1.65;
   color: #e8e9ed;
@@ -450,7 +471,7 @@ const COMPONENT_STYLES: &str = r#"
   color: var(--foreground);
   margin-bottom: var(--space-2);
   line-height: 1.4;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: 'Space Grotesk', 'IBM Plex Sans', sans-serif;
 }
 
 .header-meta {
@@ -819,6 +840,8 @@ const COMPONENT_STYLES: &str = r#"
   font-size: 0.6875rem;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
   border: 1px solid oklch(0.3 0.02 260 / 0.5);
   border-radius: 6px;
   cursor: pointer;
@@ -920,7 +943,7 @@ const COMPONENT_STYLES: &str = r#"
 
 /* Popover - Glassmorphic with fixed positioning */
 .tool-popover {
-  position: fixed;
+  position: absolute;
   z-index: 1000;
   min-width: 280px;
   max-width: 400px;
@@ -940,9 +963,20 @@ const COMPONENT_STYLES: &str = r#"
   pointer-events: none;
   text-align: left;
   white-space: normal;
+  top: calc(100% + 8px);
+  left: 0;
 }
 
 .tool-popover.visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* Fallback: show popover on hover/focus even if JS fails */
+.tool-badge:hover .tool-popover,
+.tool-badge:focus-within .tool-popover {
   opacity: 1;
   visibility: visible;
   transform: translateY(0);
@@ -1554,10 +1588,12 @@ const SEARCH_STYLES: &str = r#"
   background: oklch(0.75 0.18 195 / 0.3);
   border-radius: 2px;
   padding: 1px 0;
+  box-shadow: 0 0 0 1px oklch(0.75 0.18 195 / 0.35);
 }
 
 .search-current {
   background: oklch(0.78 0.16 75 / 0.5);
+  box-shadow: 0 0 0 1px oklch(0.78 0.16 75 / 0.6);
 }
 "#;
 
