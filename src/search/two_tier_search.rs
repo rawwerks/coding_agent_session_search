@@ -415,7 +415,7 @@ struct ScoredEntry {
 
 impl PartialEq for ScoredEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score
+        self.score.total_cmp(&other.score) == Ordering::Equal && self.idx == other.idx
     }
 }
 
@@ -430,8 +430,8 @@ impl PartialOrd for ScoredEntry {
 impl Ord for ScoredEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         self.score
-            .partial_cmp(&other.score)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&other.score)
+            .then_with(|| self.idx.cmp(&other.idx))
     }
 }
 
