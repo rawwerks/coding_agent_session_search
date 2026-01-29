@@ -174,7 +174,7 @@ impl TantivyIndex {
         let last_merge_ts = LAST_MERGE_TS.load(Ordering::Relaxed);
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         let ms_since_last = if last_merge_ts > 0 {
             now_ms - last_merge_ts
@@ -210,7 +210,7 @@ impl TantivyIndex {
         // Check cooldown period
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
         let last_merge = LAST_MERGE_TS.load(Ordering::Relaxed);
         if last_merge > 0 && (now_ms - last_merge) < MERGE_COOLDOWN_MS {
@@ -246,7 +246,7 @@ impl TantivyIndex {
         info!(segments = segment_ids.len(), "Force merging all segments");
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
             .unwrap_or(0);
 
         // Start merge and wait for completion

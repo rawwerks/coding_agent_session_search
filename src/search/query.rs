@@ -133,7 +133,7 @@ pub fn sql_placeholders(count: usize) -> String {
         return String::new();
     }
     // Capacity: n "?" + (n-1) "," = 2n - 1
-    let capacity = count * 2 - 1;
+    let capacity = count.saturating_mul(2).saturating_sub(1);
     let mut result = String::with_capacity(capacity);
     for i in 0..count {
         if i > 0 {
