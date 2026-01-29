@@ -159,10 +159,7 @@ impl Connector for ClawdbotConnector {
                         .get("role")
                         .and_then(|v| v.as_str())
                         .unwrap_or("assistant");
-                    let content = val
-                        .get("content")
-                        .map(flatten_content)
-                        .unwrap_or_default();
+                    let content = val.get("content").map(flatten_content).unwrap_or_default();
 
                     if content.trim().is_empty() {
                         continue;

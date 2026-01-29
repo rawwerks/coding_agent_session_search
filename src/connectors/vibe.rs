@@ -68,7 +68,11 @@ impl VibeConnector {
         val.get("role")
             .and_then(|v| v.as_str())
             .or_else(|| val.get("speaker").and_then(|v| v.as_str()))
-            .or_else(|| val.get("message").and_then(|m| m.get("role")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                val.get("message")
+                    .and_then(|m| m.get("role"))
+                    .and_then(|v| v.as_str())
+            })
             .unwrap_or("assistant")
             .to_string()
     }
@@ -80,23 +84,14 @@ impl VibeConnector {
         if let Some(content) = val.get("text") {
             return flatten_content(content);
         }
-        if let Some(content) = val
-            .get("message")
-            .and_then(|msg| msg.get("content"))
-        {
+        if let Some(content) = val.get("message").and_then(|msg| msg.get("content")) {
             return flatten_content(content);
         }
         String::new()
     }
 
     fn extract_timestamp(val: &Value) -> Option<i64> {
-        let candidates = [
-            "timestamp",
-            "created_at",
-            "createdAt",
-            "time",
-            "ts",
-        ];
+        let candidates = ["timestamp", "created_at", "createdAt", "time", "ts"];
 
         for key in candidates {
             if let Some(ts) = val.get(key).and_then(parse_timestamp) {
@@ -311,7 +306,13 @@ mod tests {
         assert_eq!(convs[0].title, Some("Hello there".to_string()));
         assert!(convs[0].started_at.is_some());
         assert!(convs[0].ended_at.is_some());
-        assert!(convs[0].external_id.as_deref().unwrap_or("").contains("sess-123"));
+        assert!(
+            convs[0]
+                .external_id
+                .as_deref()
+                .unwrap_or("")
+                .contains("sess-123")
+        );
     }
 
     #[test]
