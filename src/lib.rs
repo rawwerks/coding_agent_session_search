@@ -5819,6 +5819,7 @@ fn run_diag(
     let claude_path = home.join(".claude/projects");
     let cline_path = config_dir.join("Code/User/globalStorage/saoudrizwan.claude-dev");
     let gemini_path = home.join(".gemini/tmp");
+    let clawdbot_path = home.join(".clawdbot/sessions");
     let opencode_path = home.join(".opencode");
     let amp_path = config_dir.join("Code/User/globalStorage/sourcegraph.amp");
     let cursor_path = crate::connectors::cursor::CursorConnector::app_support_dir()
@@ -5831,6 +5832,7 @@ fn run_diag(
         ("claude", &claude_path, claude_path.exists()),
         ("cline", &cline_path, cline_path.exists()),
         ("gemini", &gemini_path, gemini_path.exists()),
+        ("clawdbot", &clawdbot_path, clawdbot_path.exists()),
         ("opencode", &opencode_path, opencode_path.exists()),
         ("amp", &amp_path, amp_path.exists()),
         ("cursor", &cursor_path, cursor_path.exists()),
@@ -7868,6 +7870,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
             "codex".to_string(),
             "claude_code".to_string(),
             "gemini".to_string(),
+            "clawdbot".to_string(),
             "opencode".to_string(),
             "amp".to_string(),
             "cline".to_string(),

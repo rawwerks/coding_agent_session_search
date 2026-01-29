@@ -277,6 +277,7 @@ Ingests history from all major local agents, normalizing them into a unified `Co
 - **Cline**: VS Code global storage (Task directories)
 - **Gemini CLI**: `~/.gemini/tmp` (Chat JSON)
 - **Claude Code**: `~/.claude/projects` (Session JSONL)
+- **Clawdbot**: `~/.clawdbot/sessions` (Session JSONL)
 - **OpenCode**: `.opencode` directories (SQLite)
 - **Amp**: `~/.local/share/amp` & VS Code storage
 - **Cursor**: `~/Library/Application Support/Cursor/User/` global + workspace storage (SQLite `state.vscdb`)

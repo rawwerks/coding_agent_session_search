@@ -15,9 +15,9 @@ use notify::{RecursiveMode, Watcher, recommended_watcher};
 use crate::connectors::NormalizedConversation;
 use crate::connectors::{
     Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
-    claude_code::ClaudeCodeConnector, cline::ClineConnector, codex::CodexConnector,
-    cursor::CursorConnector, factory::FactoryConnector, gemini::GeminiConnector,
-    opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
+    claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
+    codex::CodexConnector, cursor::CursorConnector, factory::FactoryConnector,
+    gemini::GeminiConnector, opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
 };
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
@@ -972,6 +972,7 @@ pub fn get_connector_factories() -> Vec<(&'static str, fn() -> Box<dyn Connector
         ("cline", || Box::new(ClineConnector::new())),
         ("gemini", || Box::new(GeminiConnector::new())),
         ("claude", || Box::new(ClaudeCodeConnector::new())),
+        ("clawdbot", || Box::new(ClawdbotConnector::new())),
         ("opencode", || Box::new(OpenCodeConnector::new())),
         ("amp", || Box::new(AmpConnector::new())),
         ("aider", || Box::new(AiderConnector::new())),
@@ -1022,6 +1023,7 @@ impl ConnectorKind {
             "cline" => Some(Self::Cline),
             "gemini" => Some(Self::Gemini),
             "claude" => Some(Self::Claude),
+            "clawdbot" => Some(Self::Clawdbot),
             "amp" => Some(Self::Amp),
             "opencode" => Some(Self::OpenCode),
             "aider" => Some(Self::Aider),
@@ -1041,6 +1043,7 @@ impl ConnectorKind {
             Self::Cline => Box::new(ClineConnector::new()),
             Self::Gemini => Box::new(GeminiConnector::new()),
             Self::Claude => Box::new(ClaudeCodeConnector::new()),
+            Self::Clawdbot => Box::new(ClawdbotConnector::new()),
             Self::Amp => Box::new(AmpConnector::new()),
             Self::OpenCode => Box::new(OpenCodeConnector::new()),
             Self::Aider => Box::new(AiderConnector::new()),
@@ -1289,6 +1292,8 @@ enum ConnectorKind {
     Gemini,
     #[serde(rename = "cd", alias = "Claude")]
     Claude,
+    #[serde(rename = "cb", alias = "Clawdbot")]
+    Clawdbot,
     #[serde(rename = "am", alias = "Amp")]
     Amp,
     #[serde(rename = "oc", alias = "OpenCode")]
