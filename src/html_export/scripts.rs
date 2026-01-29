@@ -108,17 +108,18 @@ async function copyToClipboard(text) {
         textarea.style.opacity = '0';
         document.body.appendChild(textarea);
         textarea.select();
+        let ok = false;
         try {
-            const ok = document.execCommand('copy');
-            if (ok) {
-                Toast.show('Copied to clipboard', 'success');
-                return true;
-            }
-            Toast.show('Copy failed', 'error');
+            ok = document.execCommand('copy');
         } catch (e2) {
-            Toast.show('Copy failed', 'error');
+            // execCommand threw — ok stays false
         }
         textarea.remove();
+        if (ok) {
+            Toast.show('Copied to clipboard', 'success');
+            return true;
+        }
+        Toast.show('Copy failed', 'error');
     }
     return false;
 }
@@ -253,13 +254,17 @@ const Search = {
     },
 
     clearHighlights() {
+        const parents = new Set();
         $$('.search-highlight').forEach((el) => {
             const parent = el.parentNode;
             while (el.firstChild) {
                 parent.insertBefore(el.firstChild, el);
             }
             parent.removeChild(el);
+            parents.add(parent);
         });
+        // Merge adjacent text nodes so subsequent searches work correctly
+        parents.forEach((p) => p.normalize());
         this.matches = [];
         this.currentIndex = -1;
     },
@@ -583,6 +588,7 @@ const WorldClass = {
     ticking: false,
     currentMessageIndex: -1,
     messages: [],
+    _initialized: false,
 
     init() {
         this.messages = Array.from($$('.message'));
@@ -590,10 +596,14 @@ const WorldClass = {
         this.floatingNav = $('#floating-nav');
         this.initFloatingNav();
         this.initIntersectionObserver();
-        this.initKeyboardNav();
-        this.initMessageLinks();
-        this.initScrollHandler();
-        this.initShareButton();
+        // Only bind once to avoid duplicates after decryption re-init
+        if (!this._initialized) {
+            this.initKeyboardNav();
+            this.initMessageLinks();
+            this.initScrollHandler();
+            this.initShareButton();
+            this._initialized = true;
+        }
     },
 
     initFloatingNav() {
