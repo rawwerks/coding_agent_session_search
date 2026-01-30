@@ -438,13 +438,15 @@ impl PagesConfig {
             );
         }
 
-        let account_id_set = self.deployment.account_id.is_some();
-        let api_token_set = self.deployment.api_token.is_some();
-        if account_id_set ^ api_token_set {
-            errors.push(
-                "deployment.account_id and deployment.api_token must both be set for Cloudflare API-token auth (use env:VAR syntax if needed)."
-                    .to_string(),
-            );
+        if self.deployment.target.to_lowercase() == "cloudflare" {
+            let account_id_set = self.deployment.account_id.is_some();
+            let api_token_set = self.deployment.api_token.is_some();
+            if account_id_set ^ api_token_set {
+                errors.push(
+                    "deployment.account_id and deployment.api_token must both be set for Cloudflare API-token auth (use env:VAR syntax if needed)."
+                        .to_string(),
+                );
+            }
         }
 
         // Validate time formats
