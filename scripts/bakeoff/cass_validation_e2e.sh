@@ -292,9 +292,12 @@ def percentile(values, pct):
 
 
 for q in queries:
-    q_text = str(q.get("text", "")).strip()
-    if not q_text:
+    q_raw = str(q.get("text", "")).strip()
+    if not q_raw:
         continue
+    # Extract the topic keyword (first word) from synthetic queries like "metrics search query 0"
+    # This matches how the corpus generator creates queries: f"{topic} search query {i}"
+    q_text = q_raw.split()[0] if q_raw else q_raw
     relevants = q.get("relevants", {}) or {}
     relevants = {k: v for k, v in relevants.items() if str(k) in doc_ids}
     ideal_rels = list(relevants.values())
@@ -324,8 +327,12 @@ for q in queries:
     if no_daemon:
         cmd += ["--no-daemon"]
 
+    # Pass CASS_DATA_DIR to ensure cass finds the correct index
+    env = os.environ.copy()
+    env["CASS_DATA_DIR"] = data_dir
+
     start = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     elapsed_ms = (time.perf_counter() - start) * 1000.0
 
     if proc.returncode != 0:
