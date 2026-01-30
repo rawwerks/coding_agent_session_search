@@ -18,6 +18,7 @@
 #   MAX_QUERIES          - number of queries to evaluate (default: 50)
 #   LIMIT                - search limit (default: 10)
 #   MODE                 - search mode: semantic|hybrid|lexical (default: semantic)
+#   EMBEDDER             - embedder for index: hash, fastembed (default: fastembed)
 #   MODEL                - embedder model name for semantic search (default: empty/auto)
 #   RERANK               - set to 1 to enable reranking (default: 0)
 #   RERANKER             - reranker model name (optional)
@@ -43,6 +44,7 @@ MAX_DOCS="${MAX_DOCS:-500}"
 MAX_QUERIES="${MAX_QUERIES:-50}"
 LIMIT="${LIMIT:-10}"
 MODE="${MODE:-semantic}"
+EMBEDDER="${EMBEDDER:-fastembed}"
 MODEL="${MODEL:-}"
 RERANK="${RERANK:-0}"
 RERANKER="${RERANKER:-}"
@@ -81,7 +83,7 @@ if [[ "$SMOKE" == "1" ]]; then
     APPEND_DOCS=0
 fi
 
-export CORPUS_PATH DATA_DIR MAX_DOCS MAX_QUERIES LIMIT MODE MODEL RERANK RERANKER DAEMON NO_DAEMON
+export CORPUS_PATH DATA_DIR MAX_DOCS MAX_QUERIES LIMIT MODE EMBEDDER MODEL RERANK RERANKER DAEMON NO_DAEMON
 export NDCG_MIN LATENCY_P95_MAX_MS STRICT REPORT_JSON REPORT_DOC APPEND_DOCS RUN_ID WORKSPACE_SLUG SMOKE
 
 if [[ ! -f "$CORPUS_PATH" ]]; then
@@ -111,6 +113,7 @@ log_info "Cass validation run: $RUN_ID"
 log_info "Corpus: $CORPUS_PATH"
 log_info "Data dir: $DATA_DIR"
 log_info "Mode: $MODE"
+log_info "Embedder: $EMBEDDER"
 log_info "Model: ${MODEL:-auto}"
 log_info "Rerank: $RERANK (reranker: ${RERANKER:-auto})"
 log_info "Daemon: $DAEMON (no_daemon: $NO_DAEMON)"
@@ -203,7 +206,7 @@ PY
 log_info "Running cass index"
 INDEX_ARGS=("index" "--full" "--data-dir" "$DATA_DIR" "--json")
 if [[ "$MODE" == "semantic" || "$MODE" == "hybrid" ]]; then
-    INDEX_ARGS+=("--semantic")
+    INDEX_ARGS+=("--semantic" "--embedder" "$EMBEDDER")
 fi
 
 INDEX_OUTPUT="$DATA_DIR/index_output.json"
