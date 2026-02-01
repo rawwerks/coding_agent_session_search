@@ -1293,6 +1293,8 @@ impl SqliteStorage {
                 FROM conversations c
                 JOIN agents a ON c.agent_id = a.id
                 LEFT JOIN workspaces w ON c.workspace_id = w.id
+                WHERE COALESCE(c.title, '') NOT LIKE '[SUGGESTION MODE%'
+                  AND COALESCE(c.title, '') NOT LIKE 'SUGGESTION MODE%'
                 ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC
                 LIMIT ? OFFSET ?",
         )?;

@@ -200,6 +200,8 @@ export function getRecentConversations(limit = 50) {
     return queryAll(`
         SELECT id, agent, workspace, title, source_path, started_at, ended_at, message_count
         FROM conversations
+        WHERE COALESCE(title, '') NOT LIKE '[SUGGESTION MODE%'
+          AND COALESCE(title, '') NOT LIKE 'SUGGESTION MODE%'
         ORDER BY started_at DESC
         LIMIT ?
     `, [limit]);
@@ -373,6 +375,8 @@ export function searchConversations(query, options = {}) {
         JOIN messages m ON ${ftsTable}.rowid = m.id
         JOIN conversations c ON m.conversation_id = c.id
         WHERE ${ftsTable} MATCH ?
+          AND COALESCE(c.title, '') NOT LIKE '[SUGGESTION MODE%'
+          AND COALESCE(c.title, '') NOT LIKE 'SUGGESTION MODE%'
     `;
 
     const params = [escapedQuery];
@@ -407,6 +411,8 @@ export function getConversationsByAgent(agent, limit = 50) {
         SELECT id, agent, workspace, title, source_path, started_at, message_count
         FROM conversations
         WHERE agent = ?
+          AND COALESCE(title, '') NOT LIKE '[SUGGESTION MODE%'
+          AND COALESCE(title, '') NOT LIKE 'SUGGESTION MODE%'
         ORDER BY started_at DESC
         LIMIT ?
     `, [agent, limit]);
@@ -423,6 +429,8 @@ export function getConversationsByWorkspace(workspace, limit = 50) {
         SELECT id, agent, workspace, title, source_path, started_at, message_count
         FROM conversations
         WHERE workspace = ?
+          AND COALESCE(title, '') NOT LIKE '[SUGGESTION MODE%'
+          AND COALESCE(title, '') NOT LIKE 'SUGGESTION MODE%'
         ORDER BY started_at DESC
         LIMIT ?
     `, [workspace, limit]);
@@ -440,6 +448,8 @@ export function getConversationsByTimeRange(since, until, limit = 50) {
         SELECT id, agent, workspace, title, source_path, started_at, message_count
         FROM conversations
         WHERE started_at >= ? AND started_at <= ?
+          AND COALESCE(title, '') NOT LIKE '[SUGGESTION MODE%'
+          AND COALESCE(title, '') NOT LIKE 'SUGGESTION MODE%'
         ORDER BY started_at DESC
         LIMIT ?
     `, [since, until, limit]);

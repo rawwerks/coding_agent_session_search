@@ -12415,7 +12415,9 @@ fn run_timeline(
          JOIN agents a ON c.agent_id = a.id
          LEFT JOIN sources s ON c.source_id = s.id
          LEFT JOIN messages m ON m.conversation_id = c.id
-         WHERE c.started_at >= ?1 AND c.started_at <= ?2",
+         WHERE c.started_at >= ?1 AND c.started_at <= ?2
+           AND COALESCE(c.title, '') NOT LIKE '[SUGGESTION MODE%'
+           AND COALESCE(c.title, '') NOT LIKE 'SUGGESTION MODE%'",
     );
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(start_ts), Box::new(end_ts)];

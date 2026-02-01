@@ -228,7 +228,9 @@ pub fn build_fts5_search_sql(
 FROM {fts_table}
 JOIN messages m ON {fts_table}.rowid = m.id
 JOIN conversations c ON m.conversation_id = c.id
-WHERE {fts_table} MATCH ?"#
+WHERE {fts_table} MATCH ?
+    AND COALESCE(c.title, '') NOT LIKE '[SUGGESTION MODE%'
+    AND COALESCE(c.title, '') NOT LIKE 'SUGGESTION MODE%'"#
     );
 
     if with_agent_filter {
